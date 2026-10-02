@@ -1,0 +1,29 @@
+public final class godwit/test/RunnerPathKt {
+	public static final fun forget (Lgodwit/core/Godwit;Ljava/lang/String;)V
+	public static final fun rerun (Lgodwit/core/Godwit;Ljava/util/List;Ljava/lang/String;)Lgodwit/core/MigrationOutcome;
+	public static final fun runIsolated (Lgodwit/core/Godwit;Lgodwit/core/Migration;)Lgodwit/core/MigrationOutcome;
+	public static final fun shouldHaveApplied (Lgodwit/core/Godwit;Ljava/lang/String;)V
+}
+
+public final class godwit/test/SessionEscapeDetector : com/mongodb/event/CommandListener {
+	public fun <init> ()V
+	public fun commandStarted (Lcom/mongodb/event/CommandStartedEvent;)V
+}
+
+public final class godwit/test/SessionEscapeError : java/lang/AssertionError {
+	public final fun getCollection ()Ljava/lang/String;
+	public final fun getCommand ()Ljava/lang/String;
+}
+
+public final class godwit/test/TestGodwit {
+	public final fun getClient ()Lcom/mongodb/kotlin/client/MongoClient;
+	public final fun getDatabase ()Lcom/mongodb/kotlin/client/MongoDatabase;
+	public final fun getDatabaseName ()Ljava/lang/String;
+	public final fun getGodwit ()Lgodwit/core/Godwit;
+}
+
+public final class godwit/test/TestGodwitKt {
+	public static final fun testGodwit (Lgodwit/core/GodwitConfig;Z)Lgodwit/test/TestGodwit;
+	public static synthetic fun testGodwit$default (Lgodwit/core/GodwitConfig;ZILjava/lang/Object;)Lgodwit/test/TestGodwit;
+}
+

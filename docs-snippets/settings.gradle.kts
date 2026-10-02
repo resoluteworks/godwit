@@ -1,8 +1,8 @@
-rootProject.name = "godwit-stubs"
+rootProject.name = "godwit-docs-snippets"
 
-include("godwit-core", "godwit-test")
-project(":godwit-core").projectDir = file("api-stubs/godwit-core")
-project(":godwit-test").projectDir = file("api-stubs/godwit-test")
+// The root build, so every snippet compiles against the real godwit-core and godwit-test. Gradle substitutes the
+// dependencies on works.resolute:godwit-core and works.resolute:godwit-test with its modules.
+includeBuild("..")
 
 // neg-check.sh compiles one bad snippet at a time in this module: ./gradlew :neg-check:compileKotlin -PnegSnippet=<dir>
 if (providers.gradleProperty("negSnippet").isPresent) {

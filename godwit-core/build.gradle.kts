@@ -1,4 +1,4 @@
-import godwit.build.VerifyRuntimeDependencies
+import godwit.buildlogic.VerifyRuntimeDependencies
 
 plugins {
     id("common-conventions")

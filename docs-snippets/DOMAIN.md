@@ -4,26 +4,28 @@ Every example in the godwit docs uses this one domain. The code below is real an
 ids and signatures exactly. Paths are relative to the `docs-snippets/` directory of the repository; the check scripts
 are in `scripts/` at the repository root (`../scripts/` from here).
 
-The public godwit API is in `API.md` (generated from the stubs). Never invent an API that is not there.
+The public godwit API is the source and KDoc of `../godwit-core/src/main/kotlin/godwit/core/` and
+`../godwit-test/src/main/kotlin/godwit/test/`, listed declaration by declaration in `../godwit-core/api/godwit-core.api`
+and `../godwit-test/api/godwit-test.api`. Never invent an API that is not there.
 
 ## Project layout and build
 
 | Path | What |
 |---|---|
-| `api-stubs/godwit-core/src/main/kotlin/godwit/core/` | godwit-core stubs (package `godwit.core`) |
-| `api-stubs/godwit-test/src/main/kotlin/godwit/test/` | godwit-test stubs (package `godwit.test`) |
+| `../godwit-core/src/main/kotlin/godwit/core/` | godwit-core (package `godwit.core`), built from the root build |
+| `../godwit-test/src/main/kotlin/godwit/test/` | godwit-test (package `godwit.test`), built from the root build |
 | `src/main/kotlin/com/example/shop/` | the example app (package `com.example.shop` and subpackages) |
 | `src/main/kotlin/com/example/filestore/` | a small library the shop uses (package `com.example.filestore`) |
 | `src/main/kotlin/com/example/shop/docs/<doc_slug>/` | docs snippets, one directory per doc (see below) |
 | `neg/`, `../scripts/neg-check.sh` | snippets that must not compile, and the script that proves it |
-| `../scripts/gen-api.sh` | regenerates `API.md` from the godwit-core and godwit-test stubs |
 | `../scripts/check-snippets.sh [repo-dir]` | proves every ```kotlin block in the repo's `README.md` and `docs/**/*.md` appears, after whitespace normalisation, as a contiguous run of lines in one file under `src/main/kotlin`, or under `neg/` when the block follows a line reading exactly `This does not compile:` |
 | `../scripts/check-links.sh [repo-dir]` | proves every relative link in the repo's `README.md` and `docs/**/*.md` resolves to an existing file and, with a `#fragment`, to a heading or explicit anchor in it |
 | `../scripts/check-content.sh [dir]` | content rules for the whole repository: no em dash, en dash only in numeric ranges, no history narrative, no banned phrases |
 | `../scripts/check-docs.sh` | runs the compile, `neg-check.sh`, `check-snippets.sh`, `check-links.sh` and `check-content.sh` in that order and stops at the first failure |
 
-Build: `./gradlew --offline compileKotlin` from `docs-snippets/`. It compiles godwit-core, godwit-test and the example
-app (with every docs snippet). The example app sees godwit only through the public API, as a real app does.
+Build: `./gradlew --offline compileKotlin` from `docs-snippets/`. It builds godwit-core and godwit-test from the root
+build (`includeBuild("..")` in `settings.gradle.kts`) and compiles the example app (with every docs snippet) against
+them. The example app sees godwit only through the public API, as a real app does.
 Libraries on the example app's classpath: godwit-core, godwit-test, the MongoDB Kotlin sync driver 5.7.0,
 slf4j-api 2.0.17, Kotest 6.2.5 (`kotest-runner-junit5`, `kotest-assertions-core`) and MockK 1.14.9.
 
@@ -206,8 +208,9 @@ Use these when a doc needs a migration the canonical list does not have, so docs
 Log lines (logger `godwit`, slf4j key-value pairs as Logback's `%kvp{NONE}` prints them: values unquoted, lists as
 `[a, b]`, times as ISO-8601 instants with milliseconds, `error` on "Migration failed" as the exception's class and
 message, `error` on "Retrying transaction" as `<codeName> (<code>)` or `commit`; the full list of events is in the
-`Godwit` KDoc in `API.md`). Holder `shop-7f9c4/1`, run ids are UUIDs. "Migrations up to date" only appears for a list
-without an every-start migration (`checked=7` is the shop's list without `bootstrap-customers`):
+`Godwit` KDoc in `../godwit-core/src/main/kotlin/godwit/core/Godwit.kt`). Holder `shop-7f9c4/1`, run ids are UUIDs.
+"Migrations up to date" only appears for a list without an every-start migration (`checked=7` is the shop's list
+without `bootstrap-customers`):
 
 ```text
 INFO  godwit - Migrations up to date runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f checked=7 durationMs=6

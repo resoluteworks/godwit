@@ -432,7 +432,7 @@ Every decision, with its reasoning, is indexed in [design decisions](design-deci
 | lock | the `godwit-lock` document; one holder at a time, leased, renewed by a heartbeat |
 | holder | `GodwitConfig.holder`, `<hostname>/<pid>` by default |
 | fast path | nothing due: one history read, no lock |
-| out of order | a pending once-only migration listed before an applied once-only migration |
+| out of order | a pending once-only migration listed before an applied once-only migration, counting the applied ids a later squash not yet applied names in its place |
 | unknown applied | an `APPLIED` history id that the list does not know |
 | adoption | adopting a database migrated by another tool, or by hand, through `GodwitConfig.adoptApplied` |
 | squash | a superseding migration declared with `supersedes = listOf(...)` |

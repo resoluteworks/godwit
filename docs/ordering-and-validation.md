@@ -44,8 +44,8 @@ godwit.core.InvalidMigrationsException: Invalid migrations:
 
 | # | Rule | Problem line |
 |---|---|---|
-| 1 | Every id matches `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` | `invalid id "<id>": ids match [A-Za-z0-9][A-Za-z0-9._-]{0,127}` |
-| 2 | No id appears twice, counting ids named in `supersedes` lists | `duplicate id <id> at positions <i> and <j>`, or `duplicate id <id>: named in the supersedes lists of <a> and <b>` |
+| 1 | Every id, declared or named in a `supersedes` list, matches `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` | `invalid id "<id>": ids match [A-Za-z0-9][A-Za-z0-9._-]{0,127}` |
+| 2 | No id appears twice, counting ids named in `supersedes` lists | `duplicate id <id> at positions <i> and <j>`, `duplicate id <id>: named in the supersedes lists of <a> and <b>`, or `duplicate id <id>: named twice in the supersedes list of <a>` |
 | 3 | A `supersedes` list does not name an id the list declares | `<a> supersedes <id>, which the list declares` |
 | 4 | Among once-only migrations, numeric prefixes strictly increase | `<id> is listed after <previous>, but its numeric prefix <n> is not greater than <m>` |
 | 5 | Repeatable and every-start migrations come after every once-only one | `<id> is once-only but listed after <other> (<kind>); list repeatable and every-start migrations after every once-only migration` |
@@ -54,12 +54,15 @@ godwit.core.InvalidMigrationsException: Invalid migrations:
 | 8 | Every `inBatches` batch size is 1 to 10000 | `<id> has batchSize <n>; batchSize is 1 to 10000` |
 | 9 | A `Target.Before` or `Target.Through` names a once-only id in the list (`migrate` only) | `Target.Before("<id>") names no once-only migration in the list` |
 
-Positions count from 1.
+Positions count from 1. Problems are listed by rule, in the order of this table, and within a rule in list order; an id
+listed a third time is reported against its first position. A problem line that two migrations would produce alike is
+listed once.
 
 ### 1. Id format
 
 An id is 1–128 characters from `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit. It is the `_id`
-of the history document and appears in log lines as a bare value.
+of the history document and appears in log lines as a bare value. The ids a `supersedes` list names are checked too:
+adoption records them as history documents, and the squash's own document stores them.
 
 ```kotlin
 fun invalidId(): List<Migration> = listOf(
@@ -105,6 +108,9 @@ fun supersededTwice(): List<Migration> = listOf(
 godwit.core.InvalidMigrationsException: Invalid migrations:
 - duplicate id 002-carts: named in the supersedes lists of 100-baseline and 101-carts-baseline
 ```
+
+The same id named twice in one `supersedes` list is reported as `duplicate id 002-carts: named twice in the supersedes
+list of 100-baseline`.
 
 ### 3. A squash does not name a declared id
 
@@ -315,7 +321,7 @@ always runs under the lock.
 
 | Check | Default | On failure | Configured by |
 |---|---|---|---|
-| Out of order: a pending once-only migration listed before an applied once-only migration | fail | `PlanConflictException`, nothing runs | `GodwitConfig.outOfOrder` |
+| Out of order: a pending once-only migration listed before an applied once-only migration, or before an applied id that the `supersedes` list of a later migration not yet applied names | fail | `PlanConflictException`, nothing runs | `GodwitConfig.outOfOrder` |
 | Unknown applied: an `APPLIED` history id the list does not know | warn | WARN log line and `MigrationReport.unknownApplied`; with `FAIL`, `PlanConflictException` | `GodwitConfig.unknownApplied` |
 | A squash whose superseded ids are only partly applied | fail | `PlanConflictException` | not configurable; see [squashing migrations](squashing-migrations.md) |
 | Collections, no history, nothing adopted | refuse | `UntrackedDatabaseException` | `GodwitConfig.untrackedDatabase`; see [adopting an existing database](adopting-an-existing-database.md) |
@@ -331,11 +337,13 @@ godwit.core.PlanConflictException: Migrations cannot run against this database:
 ### Out of order
 
 A once-only migration is out of order on a database when it is pending there and a once-only migration listed after it
-is `APPLIED` there. Only once-only history counts: the `APPLIED` documents of repeatable and every-start migrations,
-which every live database has and which are listed last, and ids the list does not know never make a once-only migration
-out of order. The `appliedAfter` key of the log line lists once-only ids only. It happens when a database runs code from
-a branch before an earlier migration from another branch merges. Running it would apply the two in a different order on
-this database than everywhere else, so by default godwit refuses.
+is `APPLIED` there. While a migration listed after it supersedes others and is not `APPLIED` yet, the applied ids its
+`supersedes` list names count in its place, as if the old migrations were still listed there. Only once-only history
+counts: the `APPLIED` documents of repeatable and every-start migrations, which every live database has and which are
+listed last, and ids the list does not know never make a once-only migration out of order. The `appliedAfter` key of the
+log line lists once-only ids only. It happens when a database runs code from a branch before an earlier migration from
+another branch merges. Running it would apply the two in a different order on this database than everywhere else, so by
+default godwit refuses.
 
 A walkthrough with two branches. `main` ends at `006-order-totals`, and production and staging are both at `006`.
 
@@ -461,7 +469,17 @@ WARN  godwit - Running out-of-order migration id=007-product-slugs appliedAfter=
 ```
 
 Only once-only migrations are ever out of order, and only applied once-only migrations put them there. Repeatable and
-every-start migrations run after every once-only one by definition.
+every-start migrations run after every once-only one by definition. A superseding migration that godwit records (every
+id it replaces is applied) is never out of order, because recording is not running, and a partially superseded one is
+reported as that conflict alone ([squashing migrations](squashing-migrations.md)); one that runs (none of its ids
+applied) follows the policy like any other. While it is not `APPLIED`, the ids it replaces stand in its place for the
+migrations listed before it, so a squash or a rename about to be recorded does not hide a gap. Had release 1.4 also
+renamed `008-cart-currency` to `008-cart-currency-gbp` (declared with `supersedes = listOf("008-cart-currency")`),
+staging would refuse `007-product-slugs` with the same problem line, naming `008-cart-currency`, and record nothing;
+under `OutOfOrder.RUN` it would record the rename and run `007-product-slugs` out of order. A start without the adoption
+hook sees an adoption interrupted on a standalone server the same way: the ids a `supersedes` list names are written in
+the baseline's place, so the earlier ids still missing are a gap
+([adopting an existing database](adopting-an-existing-database.md#the-process-dies-while-adoption-records-its-ids)).
 
 ### Unknown applied ids
 
@@ -585,8 +603,10 @@ reading `currency` when present) out of order. On staging `007` sees carts that 
 
 State: a test calls `migrate(list, target = Target.Through("004-order-status"))`. godwit runs once-only migrations up
 to and including `004` and no repeatable or every-start migration, so `reference-countries` and `bootstrap-customers`
-do not run. `MigrationReport.pending` lists the once-only ids after the target. What you do: insert test data shaped
-for the migration under test between a `Before` and a `Through` call. See [testing](testing.md).
+do not run. `MigrationReport.pending` lists the once-only ids after the target that are due. Only the migrations the
+target reaches are checked for out of order and partial squashes; unknown applied ids are checked as on any call. What
+you do: insert test data shaped for the migration under test between a `Before` and a `Through` call. See
+[testing](testing.md).
 
 ## Design decisions
 

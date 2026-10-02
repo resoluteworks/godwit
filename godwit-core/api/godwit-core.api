@@ -1,0 +1,378 @@
+public final class godwit/core/BatchCheckpoint {
+	public final fun getBatches ()I
+	public final fun getLastId ()Lorg/bson/BsonValue;
+}
+
+public final class godwit/core/DdlKt {
+	public static final fun dropIndexIfExists (Lcom/mongodb/kotlin/client/MongoCollection;Ljava/lang/String;)Z
+	public static final fun ensureCollection (Lcom/mongodb/kotlin/client/MongoDatabase;Ljava/lang/String;Lcom/mongodb/client/model/CreateCollectionOptions;)Z
+	public static synthetic fun ensureCollection$default (Lcom/mongodb/kotlin/client/MongoDatabase;Ljava/lang/String;Lcom/mongodb/client/model/CreateCollectionOptions;ILjava/lang/Object;)Z
+	public static final fun ensureSearchIndex-Q2Q30fc (Lcom/mongodb/kotlin/client/MongoCollection;Ljava/lang/String;Lorg/bson/conversions/Bson;Lkotlin/time/Duration;)Z
+	public static synthetic fun ensureSearchIndex-Q2Q30fc$default (Lcom/mongodb/kotlin/client/MongoCollection;Ljava/lang/String;Lorg/bson/conversions/Bson;Lkotlin/time/Duration;ILjava/lang/Object;)Z
+}
+
+public final class godwit/core/DeclarationKt {
+	public static final fun everyStart (Ljava/lang/String;Ljava/lang/String;)Lgodwit/core/MigrationDraft;
+	public static synthetic fun everyStart$default (Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lgodwit/core/MigrationDraft;
+	public static final fun migration (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)Lgodwit/core/MigrationDraft;
+	public static synthetic fun migration$default (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ILjava/lang/Object;)Lgodwit/core/MigrationDraft;
+	public static final fun repeatable (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lgodwit/core/MigrationDraft;
+	public static synthetic fun repeatable$default (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lgodwit/core/MigrationDraft;
+}
+
+public final class godwit/core/Godwit {
+	public fun <init> (Lcom/mongodb/kotlin/client/MongoCluster;Ljava/lang/String;Lgodwit/core/GodwitConfig;)V
+	public synthetic fun <init> (Lcom/mongodb/kotlin/client/MongoCluster;Ljava/lang/String;Lgodwit/core/GodwitConfig;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getBookkeepingCollections ()Ljava/util/Set;
+	public final fun getCluster ()Lcom/mongodb/kotlin/client/MongoCluster;
+	public final fun getConfig ()Lgodwit/core/GodwitConfig;
+	public final fun getDatabaseName ()Ljava/lang/String;
+	public final fun history ()Ljava/util/List;
+	public final fun markApplied (Ljava/lang/String;Ljava/lang/String;)V
+	public final fun migrate (Ljava/util/List;Lgodwit/core/Target;)Lgodwit/core/MigrationReport;
+	public final fun migrate ([Lgodwit/core/Migration;Lgodwit/core/Target;)Lgodwit/core/MigrationReport;
+	public static synthetic fun migrate$default (Lgodwit/core/Godwit;Ljava/util/List;Lgodwit/core/Target;ILjava/lang/Object;)Lgodwit/core/MigrationReport;
+	public static synthetic fun migrate$default (Lgodwit/core/Godwit;[Lgodwit/core/Migration;Lgodwit/core/Target;ILjava/lang/Object;)Lgodwit/core/MigrationReport;
+	public final fun requireUpToDate (Ljava/util/List;)V
+	public final fun status (Ljava/util/List;)Lgodwit/core/MigrationStatus;
+}
+
+public final class godwit/core/GodwitConfig {
+	public fun <init> ()V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lgodwit/core/LockConfig;Lgodwit/core/OutOfOrder;Lgodwit/core/UnknownApplied;Lgodwit/core/UntrackedDatabase;Lkotlin/jvm/functions/Function1;JLjava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lgodwit/core/LockConfig;Lgodwit/core/OutOfOrder;Lgodwit/core/UnknownApplied;Lgodwit/core/UntrackedDatabase;Lkotlin/jvm/functions/Function1;JLjava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Lgodwit/core/LockConfig;
+	public final fun component4 ()Lgodwit/core/OutOfOrder;
+	public final fun component5 ()Lgodwit/core/UnknownApplied;
+	public final fun component6 ()Lgodwit/core/UntrackedDatabase;
+	public final fun component7 ()Lkotlin/jvm/functions/Function1;
+	public final fun component8-UwyO8pc ()J
+	public final fun component9 ()Ljava/lang/String;
+	public final fun copy-G-WJXV0 (Ljava/lang/String;Ljava/lang/String;Lgodwit/core/LockConfig;Lgodwit/core/OutOfOrder;Lgodwit/core/UnknownApplied;Lgodwit/core/UntrackedDatabase;Lkotlin/jvm/functions/Function1;JLjava/lang/String;)Lgodwit/core/GodwitConfig;
+	public static synthetic fun copy-G-WJXV0$default (Lgodwit/core/GodwitConfig;Ljava/lang/String;Ljava/lang/String;Lgodwit/core/LockConfig;Lgodwit/core/OutOfOrder;Lgodwit/core/UnknownApplied;Lgodwit/core/UntrackedDatabase;Lkotlin/jvm/functions/Function1;JLjava/lang/String;ILjava/lang/Object;)Lgodwit/core/GodwitConfig;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAdoptApplied ()Lkotlin/jvm/functions/Function1;
+	public final fun getHistoryCollection ()Ljava/lang/String;
+	public final fun getHolder ()Ljava/lang/String;
+	public final fun getLock ()Lgodwit/core/LockConfig;
+	public final fun getLockCollection ()Ljava/lang/String;
+	public final fun getOutOfOrder ()Lgodwit/core/OutOfOrder;
+	public final fun getSlowTransactionWarning-UwyO8pc ()J
+	public final fun getUnknownApplied ()Lgodwit/core/UnknownApplied;
+	public final fun getUntrackedDatabase ()Lgodwit/core/UntrackedDatabase;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract class godwit/core/GodwitException : java/lang/RuntimeException {
+}
+
+public final class godwit/core/HistoryEntry {
+	public final fun getAttempts ()I
+	public final fun getCheckpoint ()Lgodwit/core/BatchCheckpoint;
+	public final fun getCounts ()Ljava/util/Map;
+	public final fun getDescription ()Ljava/lang/String;
+	public final fun getDuration-FghU774 ()Lkotlin/time/Duration;
+	public final fun getFinishedAt ()Ljava/time/Instant;
+	public final fun getGodwitVersion ()Ljava/lang/String;
+	public final fun getHolder ()Ljava/lang/String;
+	public final fun getId ()Ljava/lang/String;
+	public final fun getKind ()Lgodwit/core/MigrationKind;
+	public final fun getLastError ()Lgodwit/core/LastError;
+	public final fun getLastRunAt ()Ljava/time/Instant;
+	public final fun getOrigin ()Lgodwit/core/Origin;
+	public final fun getOutOfOrder ()Z
+	public final fun getReason ()Ljava/lang/String;
+	public final fun getRunCount ()Ljava/lang/Long;
+	public final fun getRunId ()Ljava/lang/String;
+	public final fun getStartedAt ()Ljava/time/Instant;
+	public final fun getState ()Lgodwit/core/HistoryState;
+	public final fun getSteps ()Ljava/util/List;
+	public final fun getSupersedes ()Ljava/util/List;
+	public final fun getTransactionRetries ()I
+}
+
+public final class godwit/core/HistoryState : java/lang/Enum {
+	public static final field APPLIED Lgodwit/core/HistoryState;
+	public static final field FAILED Lgodwit/core/HistoryState;
+	public static final field RUNNING Lgodwit/core/HistoryState;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lgodwit/core/HistoryState;
+	public static fun values ()[Lgodwit/core/HistoryState;
+}
+
+public final class godwit/core/InvalidMigrationsException : godwit/core/GodwitException {
+	public final fun getProblems ()Ljava/util/List;
+}
+
+public final class godwit/core/LastError {
+	public final fun getAt ()Ljava/time/Instant;
+	public final fun getMessage ()Ljava/lang/String;
+	public final fun getStack ()Ljava/lang/String;
+	public final fun getStep ()Lgodwit/core/StepKind;
+	public final fun getType ()Ljava/lang/String;
+}
+
+public final class godwit/core/LockConfig {
+	public fun <init> ()V
+	public synthetic fun <init> (JJJJILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public synthetic fun <init> (JJJJLkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1-UwyO8pc ()J
+	public final fun component2-UwyO8pc ()J
+	public final fun component3-UwyO8pc ()J
+	public final fun component4-UwyO8pc ()J
+	public final fun copy-InTURus (JJJJ)Lgodwit/core/LockConfig;
+	public static synthetic fun copy-InTURus$default (Lgodwit/core/LockConfig;JJJJILjava/lang/Object;)Lgodwit/core/LockConfig;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getHeartbeat-UwyO8pc ()J
+	public final fun getLease-UwyO8pc ()J
+	public final fun getSafetyMargin-UwyO8pc ()J
+	public final fun getWaitTimeout-UwyO8pc ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/LockHolder {
+	public final fun getAcquiredAt ()Ljava/time/Instant;
+	public final fun getExpiresAt ()Ljava/time/Instant;
+	public final fun getHolder ()Ljava/lang/String;
+	public final fun getRunId ()Ljava/lang/String;
+}
+
+public final class godwit/core/LockLostException : godwit/core/GodwitException {
+	public final fun getId ()Ljava/lang/String;
+}
+
+public final class godwit/core/LockTimeoutException : godwit/core/GodwitException {
+	public final fun getHolder ()Lgodwit/core/LockHolder;
+	public final fun getWaited-UwyO8pc ()J
+}
+
+public abstract class godwit/core/Migration {
+	public abstract fun getDescription ()Ljava/lang/String;
+	public abstract fun getId ()Ljava/lang/String;
+	public abstract fun getKind ()Lgodwit/core/MigrationKind;
+	public abstract fun getSteps ()Ljava/util/List;
+	public abstract fun getSupersedes ()Ljava/util/List;
+	public final fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/MigrationDraft {
+	public final fun inBatches (Ljava/lang/String;Lorg/bson/conversions/Bson;ILkotlin/jvm/functions/Function2;)Lgodwit/core/Migration;
+	public static synthetic fun inBatches$default (Lgodwit/core/MigrationDraft;Ljava/lang/String;Lorg/bson/conversions/Bson;ILkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lgodwit/core/Migration;
+	public final fun inTransaction (Lkotlin/jvm/functions/Function1;)Lgodwit/core/Migration;
+	public final fun outsideTransaction (Lkotlin/jvm/functions/Function1;)Lgodwit/core/OutsideTransactionMigration;
+}
+
+public final class godwit/core/MigrationFailedException : godwit/core/GodwitException {
+	public final fun getId ()Ljava/lang/String;
+	public final fun getReport ()Lgodwit/core/MigrationReport;
+	public final fun getStep ()Lgodwit/core/StepKind;
+}
+
+public abstract interface class godwit/core/MigrationKind {
+}
+
+public final class godwit/core/MigrationKind$EveryStart : godwit/core/MigrationKind {
+	public static final field INSTANCE Lgodwit/core/MigrationKind$EveryStart;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/MigrationKind$Once : godwit/core/MigrationKind {
+	public static final field INSTANCE Lgodwit/core/MigrationKind$Once;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/MigrationKind$Repeatable : godwit/core/MigrationKind {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lgodwit/core/MigrationKind$Repeatable;
+	public static synthetic fun copy$default (Lgodwit/core/MigrationKind$Repeatable;Ljava/lang/String;ILjava/lang/Object;)Lgodwit/core/MigrationKind$Repeatable;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getRevision ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/MigrationOutcome {
+	public final fun count (Ljava/lang/String;)J
+	public final fun getAttempts ()I
+	public final fun getBatches ()I
+	public final fun getCounts ()Ljava/util/Map;
+	public final fun getDuration-UwyO8pc ()J
+	public final fun getId ()Ljava/lang/String;
+	public final fun getKind ()Lgodwit/core/MigrationKind;
+	public final fun getOrigin ()Lgodwit/core/Origin;
+	public final fun getOutOfOrder ()Z
+	public final fun getSteps ()Ljava/util/List;
+	public final fun getTransactionRetries ()I
+}
+
+public final class godwit/core/MigrationReport {
+	public final fun get (Ljava/lang/String;)Lgodwit/core/MigrationOutcome;
+	public final fun getDuration-UwyO8pc ()J
+	public final fun getLockWait-FghU774 ()Lkotlin/time/Duration;
+	public final fun getPending ()Ljava/util/List;
+	public final fun getRan ()Ljava/util/List;
+	public final fun getRecorded ()Ljava/util/List;
+	public final fun getRunId ()Ljava/lang/String;
+	public final fun getUnknownApplied ()Ljava/util/List;
+	public final fun getUpToDate ()Ljava/util/List;
+}
+
+public final class godwit/core/MigrationStatus {
+	public final fun getPending ()Ljava/util/List;
+	public final fun getProblems ()Ljava/util/List;
+	public final fun getUnknownApplied ()Ljava/util/List;
+	public final fun isUpToDate ()Z
+}
+
+public final class godwit/core/Origin : java/lang/Enum {
+	public static final field ADOPTED Lgodwit/core/Origin;
+	public static final field MARKED Lgodwit/core/Origin;
+	public static final field RAN Lgodwit/core/Origin;
+	public static final field SUPERSEDED Lgodwit/core/Origin;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lgodwit/core/Origin;
+	public static fun values ()[Lgodwit/core/Origin;
+}
+
+public final class godwit/core/OutOfOrder : java/lang/Enum {
+	public static final field FAIL Lgodwit/core/OutOfOrder;
+	public static final field RUN Lgodwit/core/OutOfOrder;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lgodwit/core/OutOfOrder;
+	public static fun values ()[Lgodwit/core/OutOfOrder;
+}
+
+public final class godwit/core/OutsideTransactionMigration : godwit/core/Migration {
+	public fun getDescription ()Ljava/lang/String;
+	public fun getId ()Ljava/lang/String;
+	public fun getKind ()Lgodwit/core/MigrationKind;
+	public fun getSteps ()Ljava/util/List;
+	public fun getSupersedes ()Ljava/util/List;
+	public final fun inBatches (Ljava/lang/String;Lorg/bson/conversions/Bson;ILkotlin/jvm/functions/Function2;)Lgodwit/core/Migration;
+	public static synthetic fun inBatches$default (Lgodwit/core/OutsideTransactionMigration;Ljava/lang/String;Lorg/bson/conversions/Bson;ILkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lgodwit/core/Migration;
+	public final fun inTransaction (Lkotlin/jvm/functions/Function2;)Lgodwit/core/Migration;
+}
+
+public final class godwit/core/OutsideTransactionScope : godwit/core/StepScope {
+	public fun checkLock ()V
+	public fun count (Ljava/lang/String;J)V
+	public final fun dropIndexIfExists (Ljava/lang/String;Ljava/lang/String;)Z
+	public final fun ensureCollection (Ljava/lang/String;Lcom/mongodb/client/model/CreateCollectionOptions;)Z
+	public static synthetic fun ensureCollection$default (Lgodwit/core/OutsideTransactionScope;Ljava/lang/String;Lcom/mongodb/client/model/CreateCollectionOptions;ILjava/lang/Object;)Z
+	public final fun ensureSearchIndex-Q2Q30fc (Ljava/lang/String;Ljava/lang/String;Lorg/bson/conversions/Bson;Lkotlin/time/Duration;)Z
+	public static synthetic fun ensureSearchIndex-Q2Q30fc$default (Lgodwit/core/OutsideTransactionScope;Ljava/lang/String;Ljava/lang/String;Lorg/bson/conversions/Bson;Lkotlin/time/Duration;ILjava/lang/Object;)Z
+	public fun getDatabase ()Lcom/mongodb/kotlin/client/MongoDatabase;
+	public fun getId ()Ljava/lang/String;
+}
+
+public final class godwit/core/PendingMigrationsException : godwit/core/GodwitException {
+	public final fun getPending ()Ljava/util/List;
+	public final fun getProblems ()Ljava/util/List;
+}
+
+public final class godwit/core/PlanConflictException : godwit/core/GodwitException {
+	public final fun getProblems ()Ljava/util/List;
+}
+
+public final class godwit/core/SearchIndexNotReadyException : godwit/core/GodwitException {
+	public final fun getCollection ()Ljava/lang/String;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getWaited-UwyO8pc ()J
+}
+
+public final class godwit/core/StepKind : java/lang/Enum {
+	public static final field IN_BATCHES Lgodwit/core/StepKind;
+	public static final field IN_TRANSACTION Lgodwit/core/StepKind;
+	public static final field OUTSIDE_TRANSACTION Lgodwit/core/StepKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lgodwit/core/StepKind;
+	public static fun values ()[Lgodwit/core/StepKind;
+}
+
+public abstract class godwit/core/StepScope {
+	public abstract fun checkLock ()V
+	public final fun collection (Ljava/lang/String;)Lcom/mongodb/kotlin/client/MongoCollection;
+	public final fun count (Ljava/lang/String;I)V
+	public abstract fun count (Ljava/lang/String;J)V
+	public abstract fun getDatabase ()Lcom/mongodb/kotlin/client/MongoDatabase;
+	public abstract fun getId ()Ljava/lang/String;
+}
+
+public abstract interface class godwit/core/Target {
+}
+
+public final class godwit/core/Target$Before : godwit/core/Target {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lgodwit/core/Target$Before;
+	public static synthetic fun copy$default (Lgodwit/core/Target$Before;Ljava/lang/String;ILjava/lang/Object;)Lgodwit/core/Target$Before;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/Target$Latest : godwit/core/Target {
+	public static final field INSTANCE Lgodwit/core/Target$Latest;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/Target$Through : godwit/core/Target {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lgodwit/core/Target$Through;
+	public static synthetic fun copy$default (Lgodwit/core/Target$Through;Ljava/lang/String;ILjava/lang/Object;)Lgodwit/core/Target$Through;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getId ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class godwit/core/TransactionScope : godwit/core/StepScope {
+	public fun checkLock ()V
+	public fun count (Ljava/lang/String;J)V
+	public final fun getAttempt ()I
+	public fun getDatabase ()Lcom/mongodb/kotlin/client/MongoDatabase;
+	public fun getId ()Ljava/lang/String;
+	public final fun getSession ()Lcom/mongodb/kotlin/client/ClientSession;
+}
+
+public final class godwit/core/TransactionsUnsupportedException : godwit/core/GodwitException {
+	public final fun getDue ()Ljava/util/List;
+}
+
+public final class godwit/core/UnknownApplied : java/lang/Enum {
+	public static final field FAIL Lgodwit/core/UnknownApplied;
+	public static final field WARN Lgodwit/core/UnknownApplied;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lgodwit/core/UnknownApplied;
+	public static fun values ()[Lgodwit/core/UnknownApplied;
+}
+
+public final class godwit/core/UntrackedDatabase : java/lang/Enum {
+	public static final field REFUSE Lgodwit/core/UntrackedDatabase;
+	public static final field RUN_ALL Lgodwit/core/UntrackedDatabase;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lgodwit/core/UntrackedDatabase;
+	public static fun values ()[Lgodwit/core/UntrackedDatabase;
+}
+
+public final class godwit/core/UntrackedDatabaseException : godwit/core/GodwitException {
+	public final fun getCollections ()Ljava/util/List;
+}
+
+public final class godwit/core/ValidationKt {
+	public static final fun validateMigrations (Ljava/util/List;)V
+}
+

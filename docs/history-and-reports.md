@@ -456,7 +456,7 @@ except while the adoption hook can still run ([edge cases](#edge-cases)). It val
 
 | Property | Meaning |
 |---|---|
-| `pending` | The ids `migrate` would run, in run order. Never includes every-start migrations |
+| `pending` | The ids `migrate` would run, in run order. Never includes every-start migrations, nor a squash that `migrate` would only record as `SUPERSEDED`: recording changes no data, so the schema is already what the list expects |
 | `problems` | Why `migrate` would throw: an out-of-order migration under `OutOfOrder.FAIL`, a partially superseded squash, an untracked database, unknown applied ids under `UnknownApplied.FAIL` |
 | `unknownApplied` | `APPLIED` ids the list does not know |
 | `isUpToDate` | `pending` and `problems` are both empty |

@@ -24,8 +24,7 @@ phase stops and the disagreement is resolved before code is written.
 
 ## Rules for every phase
 
-- **Work happens on `main`.** P0 lands through one pull request. From P1 on, each phase is committed directly to
-  `main` after its gate passes locally and the diff is reviewed; CI on the push to `main` is the last gate.
+- All work is committed directly to main after its gate passes locally; CI on the push to main is the last gate.
 - **Tests ship with the code, in the same commit.** Every branch of the code a phase adds is covered. Pure code
   (validation, the planner, error classification) gets plain unit tests over values; code that talks to MongoDB gets
   integration tests against a real replica set. A bug found later ships with the test that would have caught it.
@@ -36,18 +35,18 @@ phase stops and the disagreement is resolved before code is written.
 - **Gates run on exit codes.** Each command in a gate runs only after the previous one exited 0. A gate is never one
   shell line joined with `;`. In CI each command is its own workflow step, so a failure stops the job; locally, run them
   one at a time or through a `make` target, which stops at the first failing line.
-- **The docs stay true.** Every ```kotlin block in `README.md` and `docs/` compiles in the `docs-snippets/` build
-  (against `docs-snippets/api-stubs/` until P1, against the real `godwit-core` and `godwit-test` from P1 on), and every
-  block marked "This does not compile:" fails to compile (`docs-snippets/neg/`). `scripts/check-docs.sh` runs every
-  docs check. A phase that changes a documented behaviour changes the doc and its snippet in the same commit.
+- **The docs stay true.** Every ```kotlin block in `README.md` and `docs/` compiles in the `docs-snippets/` build,
+  against the real `godwit-core` and `godwit-test` from the root build, and every block marked "This does not
+  compile:" fails to compile (`docs-snippets/neg/`). `scripts/check-docs.sh` runs every docs check. A phase that
+  changes a documented behaviour changes the doc and its snippet in the same commit.
 - **Every outcome leaves a trace.** Each phase names the log line, report field or test output that proves it worked.
   godwit's log lines are the catalogue in the `Godwit` KDoc; tests assert on them through a Logback `ListAppender`
   attached to the `godwit` logger.
 
 ## Decisions settled before P0
 
-These decisions shape P0 and every later phase. Each is settled: the docs and the API stubs state the outcome, and the
-last column links to where.
+These decisions shape P0 and every later phase. Each is settled: the docs and the public API's KDoc state the outcome,
+and the last column links to where.
 
 | Decision | Outcome | Recorded in |
 |---|---|---|
@@ -65,7 +64,7 @@ last column links to where.
 | Phase | Delivers | Main risk it retires |
 |---|---|---|
 | P0 | a two-module build that lints, tests against a replica set in CI, measures coverage, generates docs and publishes locally | toolchain and CI surprises |
-| P1 | the whole public API surface, validation and the pure planner; the docs snippets compile against it instead of the stubs | API shape and planning rules |
+| P1 | the whole public API surface, validation and the pure planner; the docs snippets compile against it | API shape and planning rules |
 | P2 | the history store and the lease lock | concurrency between processes |
 | P3 | `migrate`, `status`, `requireUpToDate`, `history` for once-only migrations; DDL helpers; error guidance | exactly-once and crash recovery |
 | P4 | `inBatches` | resumable large backfills |
@@ -108,9 +107,9 @@ replica set locally and in CI, reports coverage, generates API docs and publishe
 | `.sdkmanrc` | `java=21.0.2-tem` |
 
 The documentation build exists before P0 and P0 leaves it as it is: `docs-snippets/` is a standalone Gradle build (its
-own `settings.gradle.kts` and wrapper) that compiles the example shop and every docs snippet against the API stubs in
-`docs-snippets/api-stubs/`, with the snippets that must not compile in `docs-snippets/neg/`. The checks are in
-`scripts/`: `check-docs.sh` runs the compile, `neg-check.sh`, `check-snippets.sh`, `check-links.sh` and
+own `settings.gradle.kts` and wrapper) that compiles the example shop and every docs snippet against godwit's public
+API, with the snippets that must not compile in `docs-snippets/neg/`; P1 points it at the real modules. The checks are
+in `scripts/`: `check-docs.sh` runs the compile, `neg-check.sh`, `check-snippets.sh`, `check-links.sh` and
 `check-content.sh` in that order and stops at the first failure
 ([docs-snippets/README.md](../../docs-snippets/README.md)). P0 wires `scripts/check-docs.sh` into the Makefile and CI.
 
@@ -221,8 +220,8 @@ make publish-local
 gh run watch --exit-status
 ```
 
-**Measurable outcome.** CI is green on the P0 pull request, with the smoke test running against a real replica set.
-Traces: the smoke test logs `test replica set ready setName=docker-rs startupMs=<n>`; `verifyRuntimeDependencies`
+**Measurable outcome.** CI is green on the push of P0 to `main`, with the smoke test running against a real replica
+set. Traces: the smoke test logs `test replica set ready setName=docker-rs startupMs=<n>`; `verifyRuntimeDependencies`
 prints `runtime dependencies: org.mongodb:mongodb-driver-kotlin-sync:5.7.0, org.slf4j:slf4j-api:2.0.17`;
 `~/.m2/repository/works/resolute/godwit-core/0.1.0/godwit-core-0.1.0.pom` exists and lists those two runtime
 dependencies and the Kotlin standard library; the CI log's docs step ends with `check-docs: all checks passed`.
@@ -238,14 +237,16 @@ body with the implementation or with a `NotImplementedError` naming the phase th
 
 | Path | Content |
 |---|---|
-| `godwit-core/src/main/kotlin/godwit/core/declaration.kt` | `MigrationKind`, `StepKind`, `Migration`, `migration`, `everyStart`, `repeatable`, `MigrationDraft`, `OutsideTransactionMigration`, and the internal step holders the runner reads |
-| `.../scopes.kt`, `ddl.kt` | the scopes and DDL helpers' signatures; bodies that need I/O throw `NotImplementedError("P3")` |
-| `.../validation.kt` | `validateMigrations` |
-| `.../Godwit.kt`, `GodwitConfig.kt`, `reports.kt`, `exceptions.kt` | the public types of the stubs; `Godwit`'s I/O methods throw `NotImplementedError` naming their phase |
-| `.../internal/Plan.kt` | the plan: due migrations in run order, superseded records to write, conflicts, unknown applied ids, `needsTransactions`, `untracked` |
+| `godwit-core/src/main/kotlin/godwit/core/Declaration.kt` | `MigrationKind`, `StepKind`, `Migration`, `migration`, `everyStart`, `repeatable`, `MigrationDraft`, `OutsideTransactionMigration`, and `TransactionalMigration`, the internal subclass that `inTransaction` and `inBatches` return (a subclass of the sealed `Migration` lives in its package) |
+| `.../internal/StepBodies.kt` | the internal step holders the runner reads: an outside step and its value's type, then an `inTransaction` or `inBatches` step |
+| `.../Scopes.kt`, `Ddl.kt` | the scopes and DDL helpers' signatures; bodies that need I/O throw `NotImplementedError("P3")` |
+| `.../Validation.kt`, `.../internal/Validation.kt` | `validateMigrations`; the rules, the target check and the check `migrate` runs before any I/O |
+| `.../Godwit.kt`, `GodwitConfig.kt`, `Reports.kt`, `Exceptions.kt` | the public types of the stubs; `migrate`, `status` and `requireUpToDate` validate, then, like `Godwit`'s other I/O methods, throw `NotImplementedError` naming their phase |
+| `.../internal/DefaultHolder.kt` | the default `GodwitConfig.holder`, `<hostname>/<pid>` |
+| `.../internal/Plan.kt` | the plan: due migrations in run order, superseded records to write, ids a target stops before, ids up to date, conflicts, unknown applied ids, `needsTransactions`, `untracked`, `nothingDue`, the status's pending ids |
 | `.../internal/HistoryRecord.kt` | a history document as plain Kotlin data, the planner's input |
-| `.../internal/Planner.kt` | `plan(migrations, history, target, config, adopting): Plan` |
-| `godwit-test/src/main/kotlin/godwit/test/*.kt` | `testGodwit`, `TestGodwit`, the runner-path helpers, `SessionEscapeDetector`, `SessionEscapeError`: signatures, bodies `NotImplementedError("P7")` |
+| `.../internal/Planner.kt` | `plan(migrations, history, target, config, adopting): Plan`, and `adoptionCanRun(config, history)`, the `adopting` input |
+| `godwit-test/src/main/kotlin/godwit/test/*.kt` | `TestGodwit.kt`, `RunnerPath.kt`, `SessionEscapeDetector.kt`: `testGodwit`, `TestGodwit`, the runner-path helpers, `SessionEscapeDetector`, `SessionEscapeError`: signatures, bodies `NotImplementedError("P7")` |
 | `godwit-core/api/godwit-core.api`, `godwit-test/api/godwit-test.api` | the ABI dumps (`./gradlew apiDump`) |
 | `docs-snippets/settings.gradle.kts` | `includeBuild("..")` in place of the two `api-stubs` projects, so the docs build compiles against the root build's `godwit-core` and `godwit-test` |
 | `docs-snippets/build.gradle.kts`, `docs-snippets/neg-check/build.gradle.kts` | `implementation("works.resolute:godwit-test")` in place of `project(":godwit-test")`; Gradle substitutes the included build's module |
@@ -264,7 +265,8 @@ body with the implementation or with a `NotImplementedError` naming the phase th
     `Target.Latest` only;
   - order: once-only migrations in list order, then repeatable and every-start ones in list order;
   - conflicts: out of order under `OutOfOrder.FAIL` (a pending once-only migration listed before an applied once-only
-    migration; repeatable and every-start documents and unknown ids never count; a recorded baseline is exempt),
+    migration, the applied ids a later superseding migration not yet `APPLIED` names counting in its place; repeatable
+    and every-start documents and unknown ids never count; a recorded baseline is exempt),
     partial supersede (evaluated only while the baseline has no `APPLIED` document), unknown applied under
     `UnknownApplied.FAIL`, an adoption gap through the out-of-order policy;
   - `adopting` (an input: `adoptApplied` is set and every history document is `ADOPTED`, or there is none): the
@@ -273,7 +275,11 @@ body with the implementation or with a `NotImplementedError` naming the phase th
     conflict;
   - unknown applied ids sorted by id; ids in any recorded superseding migration's stored `supersedes` list count as
     known; `FAILED` or `RUNNING` history for an undeclared id is neither reported nor run;
-  - superseded records: all replaced ids `APPLIED` means record, none means run, some means conflict;
+  - superseded records: all replaced ids `APPLIED` means record, none means run, some means conflict; a partially
+    superseded migration is that conflict only, never also out of order, because `OutOfOrder.RUN` would not run it;
+  - targets: `Target.Before` and `Target.Through` reach the once-only migrations up to their id; only those run, are
+    recorded, or can be out of order or partially superseded, and the ones they stop before that are due or to be
+    recorded are `pending`;
   - `needsTransactions` when any due migration has a transactional step; `untracked` when history is empty and
     `adopting` is false (`status()` with a hook configured never reports it).
   - the same plan backs `status()`: every-start migrations are never pending.
@@ -285,7 +291,10 @@ body with the implementation or with a `NotImplementedError` naming the phase th
 | `DeclarationTest` | every factory and step combination; `steps`, `kind`, `supersedes`; `toString` is the id |
 | `ValidationTest` | one failing list per rule, the exact problem text, all problems in one exception, a valid list passes; `Target` errors |
 | `PlannerTest` | table-driven over kind x history state x origin x policy x target x `adopting`: due, order, conflicts, unknown ids, supersede outcomes, `needsTransactions`, `untracked`, status pending; with `adopting`, a gap and a partial supersede are not conflicts and their ids are due |
-| `PlannerPropertyTest` | 10,000 generated lists and histories (kotest-property): an `APPLIED` once-only migration is never due; due order follows list order; a repeatable or every-start migration never runs before a due once-only one; no target runs a repeatable; an `APPLIED` repeatable or every-start document never makes a once-only migration out of order |
+| `PlannerPropertyTest` | 10,000 generated lists and histories (kotest-property): an `APPLIED` once-only migration is never due; due order follows list order; a repeatable or every-start migration never runs before a due once-only one; no target runs a repeatable; an `APPLIED` repeatable or every-start document never makes a once-only migration out of order; listing the replaced ids of a superseding migration not yet `APPLIED` in its place changes nothing about out of order before it |
+| `GodwitConfigTest` | the defaults, the default holder, each `require` in `LockConfig` |
+| `ReportsTest`, `ExceptionsTest` | `count`, `report[id]`, `isUpToDate`; every exception message as the docs quote it |
+| `PhaseStubsTest`, `TestKitTest` | every I/O body throws `NotImplementedError` naming its phase; `SessionEscapeError`'s message |
 | `neg-check.sh` | every "This does not compile:" block fails with its expected message; one control snippet compiles |
 
 **Gate.**
@@ -299,10 +308,10 @@ python3 scripts/coverage-gate.py
 scripts/check-docs.sh
 ```
 
-**Measurable outcome.** Branch coverage of `validation.kt` and `godwit.core.internal.Planner*` is 100 % (the gate's
-output lists each class with `branches=<covered>/<total>`). `scripts/check-docs.sh`, run against the real modules
-with `docs-snippets/api-stubs/` gone, reports every kotlin block found and every neg expectation held, and ends with
-`check-docs: all checks passed`. `PlannerPropertyTest` logs `planner invariants held lists=10000`.
+**Measurable outcome.** Branch coverage of `godwit.core.internal.Validation*` and `godwit.core.internal.Planner*` is
+100 % (the gate's output lists each class with `branches=<covered>/<total>`). `scripts/check-docs.sh`, run against the
+real modules with `docs-snippets/api-stubs/` gone, reports every kotlin block found and every neg expectation held, and
+ends with `check-docs: all checks passed`. `PlannerPropertyTest` logs `planner invariants held lists=10000`.
 
 ## P2. History store and lease lock
 
@@ -356,7 +365,6 @@ safetyMargin = 1.seconds)`).
 | `MongoLockTest` | first-ever concurrent acquire (the loser sees 11000 and polls); re-acquire by the same owner; acquire after expiry; release by a stale owner changes nothing; a release that throws (a `failCommand` fail point) logs `Lock release failed` and the lease ends on its own; `waitTimeout` and `Duration.ZERO`; the lock document deleted by hand (the next renewal marks the lock lost and logs `Lost migration lock reason=NOT_OWNER`, the next acquire recreates it) |
 | `HeartbeatTest` | renewal keeps the lock past three leases; a renewal that fails once logs `Lock renewal failed` and the next one keeps the lock; a renewal blocked by a fail point (`failCommand` with `blockConnection`, scoped to the holder's `appName`) makes `checkLock()` throw before another process can acquire, with exactly one `Lost migration lock reason=DEADLINE_PASSED` |
 | `LockContentionTest` | 8 threads, each with its own client and owner, acquire and release 50 times; a shared counter proves at most one holder at any moment |
-| `LockConfigTest` | each `require` in `LockConfig` |
 | `LogCatalogueTest` | the wait, acquire, renewal-failed, lost and release-failed events carry their documented keys |
 
 **Gate.**
@@ -379,7 +387,7 @@ runId=... lockWaitMs=<n>`; `Lost migration lock runId=... holder=... reason=DEAD
 
 **Files.** `godwit-core/src/main/kotlin/godwit/core/internal/Runner.kt`, `Transactions.kt` (the wrapper around the
 driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (scope implementations); the bodies of
-`Godwit.migrate`, `status`, `requireUpToDate`, `history`; `ddl.kt` bodies. Tests add
+`Godwit.migrate`, `status`, `requireUpToDate`, `history`; `Ddl.kt` bodies. Tests add
 `godwit-core/src/test/kotlin/godwit/core/crash/CrashMain.kt` and `CrashHarness.kt`.
 
 **Behaviours.**
@@ -599,7 +607,7 @@ holder=...`.
 **Goal.** An application tests its migrations through the real runner with one call per test, and a forgotten
 `session` fails the test.
 
-**Files.** `godwit-test/src/main/kotlin/godwit/test/testGodwit.kt`, `runnerPath.kt`, `SessionEscapeDetector.kt`,
+**Files.** `godwit-test/src/main/kotlin/godwit/test/TestGodwit.kt`, `RunnerPath.kt`, `SessionEscapeDetector.kt`,
 `internal/SharedContainers.kt`; tests under `godwit-test/src/test/kotlin/godwit/test/`; in
 `docs-snippets/build.gradle.kts`, a `test` task that runs the Kotest specs its main source set compiles.
 

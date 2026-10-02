@@ -18,7 +18,7 @@ subprojects {
 kotlin { jvmToolchain(21) }
 
 dependencies {
-    implementation(project(":godwit-test"))
+    implementation("works.resolute:godwit-test")
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("io.kotest:kotest-runner-junit5:6.2.5")
     implementation("io.kotest:kotest-assertions-core:6.2.5")
