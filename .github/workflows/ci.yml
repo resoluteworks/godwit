@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew lintKotlin
+      - run: ./gradlew apiCheck
+      - run: ./gradlew test
+      - run: ./gradlew atlasTest
+      - run: python3 scripts/coverage-gate.py
+      - run: ./gradlew -p docs-snippets compileKotlin
+      - run: scripts/check-docs.sh
+      - run: ./gradlew coverallsJacoco
+        env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}

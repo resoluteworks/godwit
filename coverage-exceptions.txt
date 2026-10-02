@@ -1,0 +1,5 @@
+# Uncovered branches that scripts/coverage-gate.py accepts. The list starts empty and an entry needs a review comment
+# that explains why no test can reach the branch.
+#
+# One entry per line: <module> <package path>/<SourceFile.kt>:<line> <reason>
+# Example: godwit-core godwit/core/internal/Heartbeat.kt:57 the interrupt arrives only while the JVM is shutting down

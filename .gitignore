@@ -6,3 +6,4 @@
 build
 out
 docs/dokka
+__pycache__

@@ -24,8 +24,8 @@ phase stops and the disagreement is resolved before code is written.
 
 ## Rules for every phase
 
-- **One phase, one pull request, targeting `main`.** A phase merges only after its gate passes and the diff is
-  reviewed.
+- **Work happens on `main`.** P0 lands through one pull request. From P1 on, each phase is committed directly to
+  `main` after its gate passes locally and the diff is reviewed; CI on the push to `main` is the last gate.
 - **Tests ship with the code, in the same commit.** Every branch of the code a phase adds is covered. Pure code
   (validation, the planner, error classification) gets plain unit tests over values; code that talks to MongoDB gets
   integration tests against a real replica set. A bug found later ships with the test that would have caught it.
@@ -224,8 +224,8 @@ gh run watch --exit-status
 **Measurable outcome.** CI is green on the P0 pull request, with the smoke test running against a real replica set.
 Traces: the smoke test logs `test replica set ready setName=docker-rs startupMs=<n>`; `verifyRuntimeDependencies`
 prints `runtime dependencies: org.mongodb:mongodb-driver-kotlin-sync:5.7.0, org.slf4j:slf4j-api:2.0.17`;
-`~/.m2/repository/works/resolute/godwit-core/0.1.0/godwit-core-0.1.0.pom` exists and lists exactly those two runtime
-dependencies; the CI log's docs step ends with `check-docs: all checks passed`.
+`~/.m2/repository/works/resolute/godwit-core/0.1.0/godwit-core-0.1.0.pom` exists and lists those two runtime
+dependencies and the Kotlin standard library; the CI log's docs step ends with `check-docs: all checks passed`.
 
 ## P1. Declarations, validation and the planner
 
@@ -687,10 +687,10 @@ make release
 curl -sf https://repo1.maven.org/maven2/works/resolute/godwit-core/0.1.0/godwit-core-0.1.0.pom
 ```
 
-**Measurable outcome.** The final `curl` exits 0, and the published POM lists exactly two runtime dependencies. The
-consumer smoke project's README test passes against the published coordinates. Traces: `scripts/check-docs.sh` reports
-every kotlin block found, every neg expectation held and every link resolved; the GitHub Pages site serves the Dokka
-output.
+**Measurable outcome.** The final `curl` exits 0, and the published POM lists the two runtime dependencies and the
+Kotlin standard library. The consumer smoke project's README test passes against the published coordinates. Traces:
+`scripts/check-docs.sh` reports every kotlin block found, every neg expectation held and every link resolved; the
+GitHub Pages site serves the Dokka output.
 
 ## Risk register
 
