@@ -183,7 +183,7 @@ migrate(list)
   a transactional step due on a standalone server? ..... TransactionsUnsupportedException
   take the lock, waiting up to 10 min .................. LockTimeoutException
     read history again
-    adopt applied ids (only while history is empty; recorded all at once)
+    adopt applied ids (while history holds only adopted documents; only what is missing)
     plan and check again ............................... PlanConflictException, UntrackedDatabaseException
     a new transactional step due on a standalone server? TransactionsUnsupportedException
     record superseded squashes
@@ -200,7 +200,8 @@ migrate(list)
 3. **Check the plan.** A pending once-only migration listed before an applied once-only migration is out of order and
    fails by default (repeatable and every-start documents never make one out of order); history ids the list does not
    know are logged (or fail, under `UnknownApplied.FAIL`); a partially applied squash fails. These checks come before
-   the fast path, so they also stop a start that has nothing to do. See
+   the fast path, so they also stop a start that has nothing to do. While the adoption hook can still run, the
+   out-of-order and squash checks wait for it (step 7). See
    [ordering and validation](ordering-and-validation.md), [squashing migrations](squashing-migrations.md).
 4. **The fast path.** When nothing is due, `migrate` logs `Migrations up to date` and returns without taking the lock.
    `report.lockWait` is null.
@@ -208,9 +209,10 @@ migrate(list)
 6. **Take the lock.** One document in `godwit-lock`, leased on server time and renewed by a heartbeat. A second process
    waits, logs the holder every 10 s, and gives up after `LockConfig.waitTimeout`. See [locking](locking.md).
 7. **Plan again under the lock.** Another process may have done the work while this one waited, so godwit reads
-   history again before it runs anything. While history is empty, this is where the adoption hook runs and where a
-   database with collections but no history is refused unless something was adopted. See
-   [adopting an existing database](adopting-an-existing-database.md).
+   history again before it runs anything. While history holds nothing but `ADOPTED` documents (or nothing at all),
+   this is where the adoption hook runs and records the ids history lacks, where the out-of-order and squash checks
+   that waited for it run, and where a database with collections but no history is refused unless something was
+   adopted. See [adopting an existing database](adopting-an-existing-database.md).
 8. **Run.** For each due migration: mark it `RUNNING` (`attempts` + 1), run the outside step, run the transactional
    step with the `APPLIED` flip inside its transaction (an outside-only migration writes `APPLIED` after its step).
    The first failure records the migration `FAILED` with its error, stops the run and throws
@@ -259,7 +261,7 @@ The history document of `004-order-status` after it ran:
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```

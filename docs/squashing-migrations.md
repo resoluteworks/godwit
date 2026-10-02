@@ -118,7 +118,7 @@ Either way, the baseline's history document stores the `supersedes` list. These 
   "supersedes": ["001-initial-setup", "002-carts", "003-file-store", "004-order-status", "005-customer-external-ids", "006-order-totals"],
   "holder": "shop-7f9c4/1",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -137,7 +137,7 @@ Either way, the baseline's history document stores the `supersedes` list. These 
   "supersedes": ["001-initial-setup", "002-carts", "003-file-store", "004-order-status", "005-customer-external-ids", "006-order-totals"],
   "holder": "shop-9a1e2/1",
   "runId": "0199a4c3-1c2d-7e44-8a10-4d5e6f708192",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -207,7 +207,7 @@ db.getCollection("godwit-history").countDocuments({
 })
 ```
 
-The answer must be `6`. You can also run `godwit.status(squashedMigrations(...))` with release N's list: an environment that is not ready reports the partial squash in `problems`.
+The answer must be `6`. You can also run `godwit.status(squashedMigrations(...))` with release N's list: an environment that is not ready reports the partial squash in `problems`. `notYetApplied` is the gate, though: `status()` does not report a partial squash while history holds only `ADOPTED` documents and the adoption hook is configured.
 
 **Gate 2, before deleting `supersedes` from code: has this database recorded the baseline?** `hasRecordedBaseline(godwit, "100-baseline")` is true when `100-baseline` is `APPLIED` and carries its stored list. See "When to remove `supersedes`".
 
@@ -335,8 +335,8 @@ Each case gives the state, what godwit does, and what you do.
 ### The hook returns four of the six
 
 - **State:** the first godwit release starts from the baseline. The old record lists `001` to `004` only; `005` and `006` were applied by hand and never recorded.
-- **godwit:** adopts the four, then finds the baseline partially superseded and throws `PlanConflictException`. The four `ADOPTED` documents stay in history.
-- **You:** record the missing two once you have checked that they are applied: `godwit.markApplied("005-customer-external-ids", reason = "applied by hand, checked 2026-10-02")` and the same for `006-order-totals`. The next start records the baseline.
+- **godwit:** adopts the four, then finds the baseline partially superseded and throws `PlanConflictException`. The four `ADOPTED` documents stay in history. History holds nothing else, so every following start calls the hook again and throws the same conflict until the state changes.
+- **You:** record the missing two once you have checked that they are applied, with a `Godwit` built from the shop's configuration with `adoptApplied = null`, so that the marks land in the shop's history: `godwit.markApplied("005-customer-external-ids", reason = "applied by hand, checked 2026-10-02")` and the same for `006-order-totals`. The shop's own `Godwit` refuses the mark (`IllegalStateException`), because history holds nothing but `ADOPTED` documents and adoption has not ended. The hook has already recorded the four it returns, so the first `MARKED` document can end adoption, and the next start records the baseline. If the old record should have listed them, adding them there works too: the next start's hook call adopts them.
 
 ### A typo in `supersedes`
 

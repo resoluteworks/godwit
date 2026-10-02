@@ -35,7 +35,7 @@ godwit owns two collections in the database: the history collection (one documen
 | `outOfOrder` | `OutOfOrder` | `FAIL` | What happens to a pending once-only migration that is listed before an applied once-only migration | a database ran a branch early (staging, a developer's database): `RUN` |
 | `unknownApplied` | `UnknownApplied` | `WARN` | What happens when history holds an applied id that the list does not know | a CI job migrates a copy of production and the build must not be older than it: `FAIL` |
 | `untrackedDatabase` | `UntrackedDatabase` | `REFUSE` | What happens when the database has collections, no godwit history, and nothing was adopted | a database whose migrations are safe to repeat: `RUN_ALL`, rarely |
-| `adoptApplied` | `((MongoDatabase) -> Set<String>)?` | `null` | Returns the ids already applied, to adopt a database migrated by another tool or by hand | while databases are adopted; see [adopting-an-existing-database.md](adopting-an-existing-database.md) |
+| `adoptApplied` | `((MongoDatabase) -> Set<String>)?` | `null` | Returns the ids already applied, to adopt a database migrated by another tool or by hand. Called under the lock while history holds nothing but `ADOPTED` documents, so possibly more than once: it must only read | while databases are adopted; see [adopting-an-existing-database.md](adopting-an-existing-database.md) |
 | `slowTransactionWarning` | `Duration` | `20.seconds` | A transaction attempt slower than this logs `Slow transaction` | the server's transaction lifetime differs from 60 s, or you want an earlier signal |
 | `holder` | `String` | `<hostname>/<pid>` | Names this process in the lock document, in history documents and in log lines | you want the pod and the release in them |
 
@@ -282,6 +282,9 @@ Set the logger to `DEBUG` for one `Committed batch` line per page of an `inBatch
 | `WARN` | `Slow transaction` | an attempt passed `slowTransactionWarning`; the next step is `inBatches` or an outside step |
 | `WARN` | `Unknown applied migrations` | history holds ids the list does not know; normal while older code runs after a rollback |
 | `WARN` | `Marked migration applied` | someone used `markApplied`; the reason is in the line |
+| `WARN` | `Lock renewal failed` | a heartbeat renewal threw; the run keeps the lock until its local deadline. Repeated lines point at the network or the replica set |
+| `WARN` | `Lost migration lock` | the run lost the lock (`reason=NOT_OWNER` or `DEADLINE_PASSED`) and stops at its next check with `LockLostException` |
+| `WARN` | `Lock release failed` | the release threw; the lease ends on its own, and the next start waits at most one lease |
 | `ERROR` | `Migration failed` | a migration failed; the process stops and the next start retries |
 
 The driver logs separately, under `org.mongodb.driver`.

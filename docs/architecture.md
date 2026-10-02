@@ -34,11 +34,11 @@ the scopes, the DDL helpers, `validateMigrations`, the configuration, the result
 | Component | Pure or I/O | Touches | Does |
 |---|---|---|---|
 | Validation (`validateMigrations`) | pure | nothing | Checks the list: id format, duplicates (including `supersedes` ids), numeric prefixes increasing, repeatable and every-start placement, revisions, batch sizes. Public, so a unit test runs the same check |
-| Planner | pure | nothing | From the list, the history documents, the target and the configuration, computes the plan: what is due, in which order, which squashes to record, the conflicts (out of order, partial supersede, unknown applied under `FAIL`), the unknown applied ids, whether a transactional step is due, whether the database is untracked |
+| Planner | pure | nothing | From the list, the history documents, the target and the configuration, computes the plan: what is due, in which order, which squashes to record, the conflicts (out of order, partial supersede, unknown applied under `FAIL`), the unknown applied ids, whether a transactional step is due, whether the database is untracked. While adoption can still run, it leaves out the out-of-order and partial-supersede conflicts, which the plan made under the lock, after the hook has run, checks |
 | History store | I/O | `godwit-history` | Reads every document; writes the `RUNNING` marker, the fenced `APPLIED` record, checkpoints, `FAILED`, and the `ADOPTED`, `SUPERSEDED` and `MARKED` records |
 | Lock | I/O, one thread | `godwit-lock` | Acquires with polling, renews from a heartbeat thread, keeps the local deadline, answers `checkLock()` without I/O, releases |
 | Topology check | I/O | `hello` | Tells a replica set or `mongos` from a standalone server, only when a transactional step is due or adoption has ids to record |
-| Adoption | I/O | the app's hook, `listCollections` | Calls `GodwitConfig.adoptApplied` under the lock while history is empty, records the `ADOPTED` documents all at once, lists collections for the untracked-database guard |
+| Adoption | I/O | the app's hook, `listCollections` | Calls `GodwitConfig.adoptApplied` under the lock while every history document is `ADOPTED` (or there is none), inserts the `ADOPTED` documents history does not hold yet with upserts that only insert (one transaction on a replica set), lists collections for the untracked-database guard |
 | Runner | I/O | the app's data, through the scopes | Runs each due migration: marker, outside step, transaction or pages, `APPLIED` record, failure handling, logging, the report |
 | Scopes | | | `OutsideTransactionScope` and `TransactionScope`: the database, counters, `checkLock()`, and in a transaction the session and attempt number |
 | DDL helpers | I/O | the app's collections | `ensureCollection`, `ensureSearchIndex`, `dropIndexIfExists`: public extensions, and members of the outside step's scope |
@@ -53,10 +53,13 @@ migrate(migrations, target):
   validateMigrations(migrations); check target               -> InvalidMigrationsException      (no I/O)
   runId = new UUID
   history = historyStore.readAll()                           majority read concern, primary
-  plan = planner.plan(migrations, history, target, config)
-  if plan.conflicts: throw PlanConflictException             out of order, partial supersede, unknown applied under FAIL
+  adopting = config.adoptApplied != null and every history document has origin ADOPTED
+                                                             true on an empty history
+  plan = planner.plan(migrations, history, target, config, adopting)
+  if plan.conflicts: throw PlanConflictException             unknown applied under FAIL; out of order and partial
+                                                             supersede only when not adopting
   if plan.unknownApplied: log WARN "Unknown applied migrations"
-  if plan.nothingDue:                                        the fast path
+  if plan.nothingDue:                                        the fast path: no lock, so no hook
       log INFO "Migrations up to date"
       return report(lockWait = null)
   if plan.needsTransactions and topology is standalone:
@@ -65,16 +68,18 @@ migrate(migrations, target):
   log INFO "Acquired migration lock"
   try:
       history = historyStore.readAll()                       again: another process may have run them
-      if history is empty and config.adoptApplied != null:
-          adopted = config.adoptApplied(database)            the app's hook
+      if config.adoptApplied != null and every history document has origin ADOPTED:
+          returned = config.adoptApplied(database)           the app's hook
           lock.checkLock()
-          historyStore.recordAdopted(declared once-only and superseded ids among adopted)
-                                                             one transaction; on a standalone server one write per
-                                                             id, last-listed first
-          log INFO "Adopted applied migrations"
+          adopted = declared once-only and superseded ids among returned, minus the ids history holds
+          historyStore.recordAdopted(adopted)                upserts that only insert: one withTransaction,
+                                                             checkLock() before the commit; on a standalone server
+                                                             one write per id, checkLock() before each, last-listed
+                                                             first
+          log INFO "Adopted applied migrations"              adopted, and the returned ids the list ignores
           history = historyStore.readAll()
-      plan = planner.plan(migrations, history, target, config)
-      if plan.conflicts: throw PlanConflictException         includes an adoption gap (out-of-order policy)
+      plan = planner.plan(migrations, history, target, config, adopting = false)
+      if plan.conflicts: throw PlanConflictException         every conflict, an adoption gap included
       if plan.needsTransactions and topology not checked yet and topology is standalone:
           throw TransactionsUnsupportedException             a transactional step became due under the lock
       if plan.untracked and config.untrackedDatabase == REFUSE:
@@ -92,6 +97,14 @@ Points that follow from it:
 - **Conflicts are checked before the fast path.** `UnknownApplied.FAIL` therefore stops a start that has nothing to do,
   which is the case it exists for (an older release started on a newer database). Out-of-order and partial-supersede
   conflicts always involve a due migration, so they would stop the call either way.
+- **While adoption can still run, the order checks wait for the hook.** With `adoptApplied` configured and every
+  history document `ADOPTED`, the plan made before the lock leaves out the out-of-order and partial-supersede conflicts;
+  the plan made under the lock, after the hook has run and its ids are recorded, checks them. An adoption interrupted
+  on a standalone server leaves the later ids recorded and the earlier ones missing, which is a gap. Checked before the
+  lock, the gap would throw `PlanConflictException` under `OutOfOrder.FAIL` on every start before the hook could
+  complete the adoption. Under `OutOfOrder.RUN` the pre-lock plan reports no conflict; the missing ids are not run
+  because the plan that runs is made after the hook has recorded them. Both conflicts involve a due migration, so
+  deferring them never sends a start down the fast path.
 - **The untracked-database guard runs under the lock.** An empty history read before the lock could be a race with
   another process that has just started a new database's first migration; under the lock, an empty history is
   definitive. An empty history is never the fast path (everything is due), so it always reaches the lock.
@@ -103,16 +116,49 @@ Points that follow from it:
   ([repeatable-migrations.md](repeatable-migrations.md#an-older-release-starts-after-a-newer-one)). When the plan made
   under the lock has a transactional step due and the pre-lock plan had none, godwit runs `hello` then, so a standalone
   server still gets `TransactionsUnsupportedException` rather than the driver's misleading error.
-- **Adoption is all or nothing.** The `ADOPTED` documents commit in one transaction, so a process that dies while it
-  records them leaves history empty, and the next start calls the hook again. A standalone server has no transactions:
-  there godwit writes the documents one at a time, the last-listed id first, so an interrupted adoption leaves a gap
-  before a recorded id, which `OutOfOrder.FAIL` refuses on the next start instead of running the missing migrations
-  over live data.
+- **Adoption completes itself.** The hook runs on every start that takes the lock while history holds nothing but
+  `ADOPTED` documents, and each call records only the ids history lacks, with upserts that only insert, so a repeated
+  call changes nothing recorded and removes nothing. On a replica set the documents of one call commit in one
+  transaction, run through the driver's `withTransaction`: a transient error such as a primary stepdown is retried in
+  the same call, and a process that dies while it records them leaves either all of them or none, so the next start
+  records whatever is missing (nothing, if the commit applied). A standalone server has no transactions: there godwit
+  writes the documents one at a time, and the next start records the ones an interruption left out. A document of
+  another origin (`RAN`, `SUPERSEDED`, `MARKED`) ends adoption; godwit decides from the history each start reads, so
+  deleting every such document by hand reopens it. The standalone writes go last-listed id first, in the reverse of
+  the list's once-only order where each migration is preceded by the ids its `supersedes` list names, so that a start
+  without the hook sees a partial adoption as a gap before a recorded id, which `OutOfOrder.FAIL` refuses, or as a
+  partial supersede, which is always refused, and not as a shorter prefix whose missing migrations would run.
 
 `status(migrations)` is the first half of this: validate, read history, plan, with no lock, no adoption and no writes.
-It reports an untracked database only when no `adoptApplied` hook is configured, because only `migrate` runs the hook.
+It plans with the same `adopting` flag, so while adoption can still run it reports neither the out-of-order and
+partial-supersede conflicts nor an untracked database: only `migrate` runs the hook, which may resolve them. The ids
+adoption has not recorded are pending.
 `requireUpToDate` throws when `status` is not up to date. `history()` is `historyStore.readAll()` mapped to
-`HistoryEntry`. `markApplied` takes the lock like `migrate` and writes one document ([History writes](#history-writes)).
+`HistoryEntry`.
+
+```text
+markApplied(id, reason):
+  require(reason is not blank)                               -> IllegalArgumentException     (no I/O)
+  lock.acquire(config.lock.waitTimeout)                      -> LockTimeoutException
+  try:
+      history = historyStore.readAll()                       majority read concern, primary
+      if config.adoptApplied != null and every history document has origin ADOPTED:
+          throw IllegalStateException                        adoption has not ended; true on an empty history
+      if history[id] is REPEATABLE or EVERY_START:
+          throw IllegalArgumentException
+      historyStore.recordMarked(id, reason)                  conditional upsert on state != APPLIED
+      log WARN "Marked migration applied"                    only when the write changed the document
+  finally:
+      lock.release()
+```
+
+The adoption check uses the history read that `markApplied` makes under the lock. A `MARKED` document ends adoption, so
+a mark made while the hook can still run would keep it from recording the ids it has not recorded yet, and the next
+start would run them over the live data. The exception's message names both ways forward: run `migrate()` first so
+the hook adopts, or mark from a `Godwit` built from the same configuration with `adoptApplied = null`, which skips the
+check, writes to the same history and lock collections, and is the path for a deliberate repair, with every instance
+stopped. The repeatable and every-start check applies in any state, `APPLIED` included. The write is in
+[History writes](#history-writes).
 
 ## Running one migration
 
@@ -142,29 +188,38 @@ run(m):
           inBatches     -> pages(m, doc.checkpoint)
       log INFO "Applied migration"
   catch e:
-      if e is LockLostException or the lock is lost by now:
-          log ERROR "Migration failed"; throw LockLostException(m.id)       no history write
+      if e is LockLostException:                                           checkLock() or a fence stopped the step
+          log ERROR "Migration failed"; throw e                            no history write
+      if the lock is lost by now:                                          a step error and a lock loss together
+          historyStore.markFailed(m, e)                                    fenced: matches only while no other run has
+                                                                           taken the document over
+          log ERROR "Migration failed"; throw LockLostException(m.id, cause = e)
       if historyStore.markFailed(m, e) matched nothing:                    outside any transaction, fenced on owner and RUNNING
           doc = historyStore.read(m.id)                                    primary
           if doc is APPLIED with this run's owner:                         the commit applied; only its reply failed
               log INFO "Applied migration"; continue with the next migration
-          throw LockLostException(m.id)                                    another run owns the document
+          log ERROR "Migration failed"; throw LockLostException(m.id, cause = e)   another run owns the document
       log ERROR "Migration failed"
       throw MigrationFailedException(m.id, step, report so far, e, guidance(e))
 ```
 
 - The `RUNNING` marker is written before any step, outside any transaction, with majority write concern, on the same
   causally consistent session that later carries the transaction, so the transaction's snapshot sees it.
-- A run that lost the lock writes nothing more to history. The process that takes the lock over owns the document.
+- A run that lost the lock writes nothing more to history, with one exception: when a step's own error and the lock
+  loss coincide, it still sends the `FAILED` write, so that `lastError` keeps the step's error. That write is fenced on
+  this run's owner token and `RUNNING`, so it matches only while no other run has written its marker; once one has,
+  it matches nothing and the process that took the lock over owns the document. Either way `migrate` throws
+  `LockLostException` with the step's error as its cause. A lock loss alone (a `LockLostException` from `checkLock()`
+  or a fence) writes nothing.
 - The driver can throw after a commit that applied: a client-side `timeoutMS` that ends during the commit's majority
   wait (the driver does not retry a `MongoOperationTimeoutException` on commit), or commit retries that run out of the
   120 s window. The same holds for the `APPLIED` record of an outside-only migration and for the last page of an
   `inBatches` step. The `FAILED` write is therefore fenced on `state: RUNNING` as well as the owner: on a document that
   the failed-looking commit made `APPLIED`, it matches nothing, and godwit reads the document instead of recording a
   failure. Without the state in the fence, the next start would find `FAILED` and run the transactional step again.
-- If the `FAILED` write itself fails, the document stays `RUNNING` and the `MigrationFailedException` carries the write's
-  exception as a suppressed exception. Other history and lock write failures propagate as the driver's exceptions
-  ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
+- If the `FAILED` write itself fails, the document stays `RUNNING` and the `MigrationFailedException` (or the
+  `LockLostException`) carries the write's exception as a suppressed exception. Other history and lock write failures
+  propagate as the driver's exceptions ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
 - `withTransaction` is the driver's: it re-runs the body on `TransientTransactionError` and retries the commit on
   `UnknownTransactionCommitResult`, for up to 120 s. godwit wraps the body to count attempts, pause before each attempt
   after the first (driver 5.7.0 has no backoff of its own), reset counters, time each attempt (`Slow transaction` above
@@ -191,12 +246,13 @@ stateDiagram-v2
 | From | Event | To | Written by | Fence |
 |---|---|---|---|---|
 | (none) | A run starts | `RUNNING` | marker upsert, outside any transaction | Once-only: `state != APPLIED` |
-| (none) | Adoption, squash, `markApplied` | `APPLIED` (`ADOPTED`, `SUPERSEDED`, `MARKED`) | conditional upsert, under the lock | `state != APPLIED` |
+| (none) | Adoption | `APPLIED` (`ADOPTED`) | upsert that only inserts (`$setOnInsert`), under the lock, only while every document is `ADOPTED`, and only for ids the history read under the lock lacks | none: an existing document matches and stays unchanged |
+| (none) | Squash, `markApplied` | `APPLIED` (`SUPERSEDED`, `MARKED`) | conditional upsert, under the lock; `markApplied` only once adoption has ended, or on a `Godwit` without `adoptApplied` | `state != APPLIED` |
 | `RUNNING` | The last step's work commits | `APPLIED` (`RAN`) | inside the step's transaction, or after an outside-only step | `owner` = this run, `state` = `RUNNING` |
-| `RUNNING` | A step throws (lock still held) | `FAILED` | after the step, outside any transaction | `owner` = this run, `state` = `RUNNING`; matching nothing means a commit applied (`APPLIED` by this run) or another run took over |
+| `RUNNING` | A step throws (also when the lock is lost at the same moment) | `FAILED` | after the step, outside any transaction | `owner` = this run, `state` = `RUNNING`; matching nothing means a commit applied (`APPLIED` by this run) or another run took over |
 | `RUNNING` | Process dies, lock lost | `RUNNING` (unchanged) | nobody | |
 | `RUNNING` or `FAILED` | The next run starts | `RUNNING`, `attempts` + 1 | marker upsert | Once-only: `state != APPLIED` |
-| `RUNNING` or `FAILED` | `markApplied` | `APPLIED` (`MARKED`) | conditional update, under the lock | `state != APPLIED` |
+| `RUNNING` or `FAILED`, once-only | `markApplied` | `APPLIED` (`MARKED`) | conditional update, under the lock | `state != APPLIED` |
 | `APPLIED`, repeatable | Revision differs | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
 | `APPLIED`, every-start | Every `Target.Latest` start | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
 | `APPLIED`, once-only | anything | `APPLIED` | nobody: every write is conditional on `state != APPLIED` | |
@@ -272,7 +328,7 @@ db.getCollection("godwit-lock").updateOne(
 ```
 
 A release that matches nothing changes nothing: the lease already belongs to another run. A release that fails (the
-database is unreachable) is not retried; the lease ends on its own.
+database is unreachable) is not retried; it logs `Lock release failed` at WARN, and the lease ends on its own.
 
 **Waiting.** While the acquire returns "held", godwit sleeps 250 ms, doubling up to 5 s, each sleep randomised, and
 every 10 s reads the lock document (`findOne({ _id: "godwit-history" })`) to log the holder. When `waitTimeout` passes,
@@ -282,9 +338,11 @@ it reads the document once more for `LockTimeoutException.holder` (null when the
 `heartbeat`. Each renewal records the monotonic time it was sent; when it succeeds, the local deadline becomes that time
 plus `lease` minus `safetyMargin`. Before every renewal the thread checks the deadline: once it has passed, the lock is
 lost for good, and the thread stops without renewing (a renewal sent after a long pause could otherwise extend a lease
-the run has already given up). A renewal that throws is logged nowhere and retried at the next tick; the deadline
-decides. The thread catches every `Throwable`, because an exception escaping a scheduled task silently cancels every
-later run of it.
+the run has already given up). A renewal that throws logs `Lock renewal failed` at WARN and is retried at the next
+tick; the deadline decides. A renewal that matches nothing, or a deadline that passes, marks the lock lost and logs
+`Lost migration lock` at WARN, once per run, with `reason` `NOT_OWNER` or `DEADLINE_PASSED`; when `checkLock()` on the
+step's thread sees the deadline pass first, it logs the line instead. The thread catches every `Throwable`, because an
+exception escaping a scheduled task silently cancels every later run of it.
 
 **`checkLock()`** throws `LockLostException` when the lost flag is set or the monotonic clock is past the deadline. It
 does no I/O, so a step can call it once per item.
@@ -314,7 +372,7 @@ db.getCollection("godwit-history").findOneAndUpdate(
     $set: {
       kind: "ONCE", steps: ["IN_TRANSACTION"], state: "RUNNING", origin: "RAN",
       owner: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f", holder: "shop-7f9c4/1",
-      runId: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f", startedAt: new Date(), godwitVersion: "1.0.0", v: 1
+      runId: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f", startedAt: new Date(), godwitVersion: "0.1.0", v: 1
     },
     $inc: { attempts: 1 }
   },
@@ -338,7 +396,7 @@ db.getCollection("godwit-history").findOneAndUpdate(
         attempts: { $cond: [{ $eq: ["$state", "APPLIED"] }, 1, { $add: [{ $ifNull: ["$attempts", 0] }, 1] }] },
         owner: { $literal: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f" }, holder: { $literal: "shop-7f9c4/1" },
         runId: { $literal: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f" }, startedAt: new Date(),
-        godwitVersion: "1.0.0", v: 1
+        godwitVersion: "0.1.0", v: 1
       }
     }
   ],
@@ -392,13 +450,42 @@ db.getCollection("godwit-history").updateOne(
 )
 ```
 
-**`ADOPTED`, `SUPERSEDED` and `MARKED` records.** Under the lock, a conditional upsert on `state != APPLIED`, setting
+**`ADOPTED` records.** Under the lock, an upsert that only inserts: every field is in `$setOnInsert`, so a document
+that already exists, whatever its state, matches and stays unchanged:
+
+```javascript
+db.getCollection("godwit-history").updateOne(
+  { _id: "003-file-store" },
+  {
+    $setOnInsert: {
+      kind: "ONCE", steps: [], state: "APPLIED", origin: "ADOPTED", attempts: 0,
+      owner: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f", holder: "shop-7f9c4/1",
+      runId: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f", finishedAt: new Date(), godwitVersion: "0.1.0", v: 1
+    }
+  },
+  { upsert: true }
+)
+```
+
+Adoption writes only the ids that the history read under the lock does not hold. The insert-only upsert keeps a write
+harmless when that read is stale, as it is for a run that lost the lock while its hook read: on an existing document
+it matches and changes nothing (a conditional upsert would raise a duplicate key there, which aborts a transaction,
+or turn another run's `RUNNING` document into `ADOPTED`), and two transactions that insert the same id meet in a write
+conflict, which the driver retries, after which the upsert matches. On a replica set the records of one call are
+written in one transaction through the driver's `withTransaction` (snapshot read concern, majority write concern on
+the commit, primary), with `checkLock()` before the commit: a transient error such as a primary stepdown is retried
+in the same call, and any other error, a `LockLostException` included, leaves nothing recorded and propagates. On a
+standalone server godwit writes one document per id with majority write concern, calling `checkLock()` before each,
+last-listed first: in the reverse of the list's once-only order, where each migration is preceded by the ids its
+`supersedes` list names, in that list's order.
+
+**`SUPERSEDED` and `MARKED` records.** Under the lock, a conditional upsert on `state != APPLIED`, setting
 `state: "APPLIED"`, the origin, `holder`, `owner`, `runId` and `finishedAt`; inserted documents also get `kind: "ONCE"`,
 `steps: []` and `attempts: 0` (`$setOnInsert`). `SUPERSEDED` stores `supersedes`; `MARKED` stores `reason` and removes
-`lastError` and `checkpoint`. A duplicate key means the id is already `APPLIED`, which leaves it unchanged. The
-`ADOPTED` records of one adoption commit in one transaction (one write per id, last-listed first, on a standalone
-server). `markApplied` reads the document first and throws `IllegalArgumentException` without writing when its `kind`
-is `REPEATABLE` or `EVERY_START`.
+`lastError` and `checkpoint`. A duplicate key means the id is already `APPLIED`, which leaves it unchanged.
+`markApplied` checks the history it reads under the lock first, and writes nothing when it throws:
+`IllegalStateException` while `adoptApplied` is set and every document is `ADOPTED` (or there is none), and
+`IllegalArgumentException` when the id's document has `kind` `REPEATABLE` or `EVERY_START`, in any state.
 
 ## The fenced `APPLIED` record
 
@@ -662,7 +749,8 @@ the default registry); the scopes' `collection(...)` returns `Document`s; a step
 **History documents with an unknown `v`.**
 A database migrated by a newer godwit with a newer document format, then started with an older godwit (a rollback of
 the library itself). The older godwit reads the fields it knows. A format change that an older reader would
-misinterpret gets a new `v` and a new major version of godwit.
+misinterpret gets a new `v` and a breaking release of godwit: a new minor version during 0.x, a new major version from
+`1.0.0` on ([DD-25](design-decisions.md#dd-25-0x-until-proven-in-production)).
 
 ## Design decisions
 

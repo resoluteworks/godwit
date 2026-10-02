@@ -290,6 +290,18 @@ What to take from it:
   not. Migrations in a rolling deploy must suit both releases (add fields and indexes first, remove them in a later
   release).
 
+### Adoption under the lock
+
+The same re-read decides whether a start adopts a database migrated before godwit
+([adopting-an-existing-database.md](adopting-an-existing-database.md)). Only the lock holder calls
+`GodwitConfig.adoptApplied` and records what it returns, so two processes never adopt at once, and a hook that godwit
+calls on several starts is called by one process at a time. The holder calls it when the history read under the lock
+holds nothing but `ADOPTED` documents: a process that waited while another adopted and ran a migration finds that
+migration's document and does not call the hook. The heartbeat keeps renewing while the hook reads, so a slow read
+keeps the lease. godwit calls `checkLock()` after the hook returns and again before it commits the adopted ids (before
+each write on a standalone server): a run that lost the lock during a long read records nothing and throws
+`LockLostException`.
+
 ## A crashed holder
 
 A holder that dies (OOM kill, `SIGKILL`, a node failure) stops renewing its lease. Nothing releases the lock; the lease
@@ -345,6 +357,22 @@ reach a majority, a stop-the-world pause longer than the lease. godwit detects i
   succeeds before it, the lock is lost. Because the deadline counts from when the renewal was sent, the holder gives
   the lock up at least `safetyMargin` before the server lets anyone else take it.
 
+A renewal that throws (it timed out, or no primary was reachable) does not lose the lock by itself: it logs a warning
+and the next renewal tries again, until the deadline decides. Three WARN lines trace the lock's trouble, each with the
+run's `runId` and `holder`:
+
+| Message | Logged when | Other keys |
+|---|---|---|
+| `Lock renewal failed` | A renewal threw. The run still holds the lock until its local deadline | `error`: the exception's class and message |
+| `Lost migration lock` | A renewal matched no lock document with this run's token, or the local deadline passed. Logged once per run, by the heartbeat thread or by `checkLock()`, whichever notices first | `reason`: `NOT_OWNER` or `DEADLINE_PASSED` |
+| `Lock release failed` | The release in `finally` threw. The lease ends on its own, at most `lease` after the last renewal | `error`: the exception's class and message |
+
+```text
+WARN  godwit - Lock renewal failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
+WARN  godwit - Lost migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 reason=DEADLINE_PASSED
+WARN  godwit - Lock release failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
+```
+
 Once lost, the lock stays lost for that run: the heartbeat stops and never renews again. The run finds out at its next
 check:
 
@@ -355,6 +383,12 @@ check:
 `checkLock()` throws `LockLostException`. Inside a transaction that error is not transient, so the transaction aborts and
 its writes roll back. The run writes nothing more to history and throws `LockLostException` from `migrate`. The process
 fails its start and the orchestrator restarts it.
+
+A step can also fail on its own at the moment the lock is lost: an HTTP call times out during the same pause that cost
+the lock. godwit then throws `LockLostException` with the step's exception as its `cause`, and still sends the step's
+`FAILED` write, so that history's `lastError` keeps the error. That write is fenced like every other (the owner token
+and `RUNNING`): it matches only while no other process has taken the migration over, and matches nothing once one has
+([failure-and-recovery.md](failure-and-recovery.md#lock-lost)).
 
 A second guard covers the case where the check passes and the lock is lost an instant later, before the commit lands: the
 `APPLIED` record and every `inBatches` checkpoint are written inside the step's transaction with a filter on the owner
@@ -368,21 +402,31 @@ the timing.
 |---|---|---|---|
 | 10:15:00.214 | Renewal succeeds. Local deadline 10:15:50.214 | Lease until 10:16:00.214 | Waiting |
 | 10:15:05 | Network path to the database fails during page 1051 | Page 1050's checkpoint is committed | |
-| 10:15:20.2 | Renewal times out (5 s) | | |
-| 10:15:40.2 | Renewal times out | | |
-| 10:15:50.214 | Local deadline passes: lock lost, heartbeat stops | | |
+| 10:15:20.2 | Renewal times out (5 s): `WARN Lock renewal failed` | | |
+| 10:15:40.2 | Renewal times out: `WARN Lock renewal failed` | | |
+| 10:15:50.214 | Local deadline passes: lock lost. The heartbeat's next tick (10:16:00.2) finds it passed, logs `WARN Lost migration lock reason=DEADLINE_PASSED` and stops | | |
 | 10:16:00.214 | | Lease ends | |
 | 10:16:02.6 | | | Acquires, re-reads history: `006` `RUNNING`, checkpoint after page 1050. `WARN Resuming interrupted migration id=006-order-totals attempts=2` |
-| 10:16:05 | The page 1051 call fails: no primary is reachable. The run checks the lock before going further, finds it lost, and `migrate` throws `LockLostException`, writing nothing to history. The start fails | | Running pages 1051 onwards |
+| 10:16:05 | The page 1051 call fails: no primary is reachable (a server selection timeout). Inside a transaction the driver labels that error `TransientTransactionError` and runs the page again, and the page's first `checkLock()` finds the lock lost: `migrate` throws `LockLostException`, writing nothing to history. The release in `finally` cannot reach the database either: `WARN Lock release failed` 5 s later. The start fails | | Running pages 1051 onwards |
 | 10:16:40 | Network returns. The restarted process reads history: `006` is not `APPLIED`, so it waits for the lock | | |
 | 10:17:31 | | | `006` applied, `attempts=2`. Releases |
 | 10:17:33 | Acquires, re-reads, runs only `bootstrap-customers` | | |
 
-`shop-7f9c4/1` logs:
+`shop-7f9c4/1` logs, among the lines of its earlier pages:
 
 ```text
+WARN  godwit - Lock renewal failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
+WARN  godwit - Lock renewal failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
+WARN  godwit - Lost migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 reason=DEADLINE_PASSED
 ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 error=godwit.core.LockLostException: Lost the migration lock while running 006-order-totals
+WARN  godwit - Lock release failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
 ```
+
+The page runs again because the driver retries a transaction body after a network or server selection error, within
+its 120 s window. An app client that sets `timeoutMS` turns the same failure into a `MongoOperationTimeoutException`,
+which `withTransaction` does not retry, so the page fails as a step error: `MigrationFailedException` while the run
+still holds the lock, `LockLostException` with the timeout as its cause once the lock is lost
+([failure-and-recovery.md](failure-and-recovery.md#lock-lost)).
 
 The history document of `006-order-totals` while `shop-7f9c4/1` was running it:
 
@@ -403,7 +447,7 @@ The history document of `006-order-totals` while `shop-7f9c4/1` was running it:
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -427,7 +471,7 @@ After `shop-2b8e1/1` took it over (the checkpoint is unchanged; owner, holder, r
   "holder": "shop-2b8e1/1",
   "owner": "9a7c1e20-64b3-4c8f-a5d2-7e3f10b2c946",
   "runId": "0199a4c2-8a40-7d12-b3c4-1e2f3a4b5c6d",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -442,10 +486,11 @@ the page's writes and its fenced checkpoint update and before the commit.
   frozen transaction has written the same history document, so the marker write waits for it.
 - About 10:16:08: the frozen transaction reaches the server's 60 s transaction lifetime and is aborted. The marker
   write goes through: the document now carries `shop-2b8e1/1`'s owner token and the checkpoint after page 1050.
-- 10:16:23: `shop-7f9c4/1` resumes. Its heartbeat finds the deadline passed and stops renewing. The transaction's
-  commit fails, because the server already aborted the transaction; that error is transient, so the driver runs the
-  page's body again, and the body's first `checkLock()` throws `LockLostException`. Without that check, the re-run's
-  fenced checkpoint update would match nothing (the owner token is `shop-2b8e1/1`'s now) and abort the transaction.
+- 10:16:23: `shop-7f9c4/1` resumes. Its heartbeat finds the deadline passed, logs `WARN Lost migration lock
+  reason=DEADLINE_PASSED` and stops renewing. The transaction's commit fails, because the server already aborted the
+  transaction; that error is transient, so the driver runs the page's body again, and the body's first `checkLock()`
+  throws `LockLostException`. Without that check, the re-run's fenced checkpoint update would match nothing (the owner
+  token is `shop-2b8e1/1`'s now) and abort the transaction.
 
 ### Long steps and `checkLock()`
 
@@ -582,11 +627,11 @@ dead holder, not a stuck one. Give every external call a timeout. To recover now
 ends within 60 s and the next start retries the migration.
 
 **A primary election during the run.**
-The primary steps down at 10:15:00 and a new one is elected 12 s later. The renewal at 10:15:00.2 times out; the one at
-10:15:20.2 reaches the new primary and succeeds. The local deadline (50 s after the renewal sent at 10:14:40.2) never
-passed, so the run continues. The page whose transaction was in flight fails with a transient error and the driver
-runs it again. You do nothing. Elections usually take well under 60 s; if your deployment's take longer, raise the
-lease (next case).
+The primary steps down at 10:15:00 and a new one is elected 12 s later. The renewal at 10:15:00.2 times out and logs
+`WARN Lock renewal failed`; the one at 10:15:20.2 reaches the new primary and succeeds. The local deadline (50 s after
+the renewal sent at 10:14:40.2) never passed, so the run continues. The page whose transaction was in flight fails with
+a transient error and the driver runs it again. You do nothing. Elections usually take well under 60 s; if your
+deployment's take longer, raise the lease (next case).
 
 **Tuning the lease for slow failovers.**
 A run keeps the lock as long as some renewal succeeds within `lease` minus `safetyMargin` of the previous successful one
@@ -610,10 +655,11 @@ The message is "heartbeat must be positive and below lease minus safetyMargin". 
 
 **Someone deletes the lock document during a run.**
 `shop-7f9c4/1` holds the lock; an operator deletes `godwit-lock`'s document to "unstick" a deploy. The next renewal
-matches nothing, the holder marks the lock lost and fails its run with `LockLostException` at its next check, and any
-waiting process acquires a fresh lock at once (the acquire upsert recreates the document). The fence keeps the
-transactional work safe, but the run is wasted and restarts. Never delete or edit the lock document. A lock that looks
-stuck either belongs to a live run (look at `refreshedAt`: it moves every 20 s) or frees itself within 60 s.
+matches nothing, the holder marks the lock lost (`WARN Lost migration lock reason=NOT_OWNER`) and fails its run with
+`LockLostException` at its next check, and any waiting process acquires a fresh lock at once (the acquire upsert
+recreates the document). The fence keeps the transactional work safe, but the run is wasted and restarts. Never delete
+or edit the lock document. A lock that looks stuck either belongs to a live run (look at `refreshedAt`: it moves every
+20 s) or frees itself within 60 s.
 
 **Someone sets `expiresAt` far in the future by hand.**
 Every start waits `waitTimeout` and fails, until that time. Fix the document (set `expiresAt` to now) and leave it alone

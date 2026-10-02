@@ -102,11 +102,12 @@ What the stance means in practice:
 | Session from another `MongoClient` | `FAILED`, guidance | `MigrationFailedException` | Same until the wiring changes |
 | `inBatches` page k fails | Pages before k and their checkpoint committed; `FAILED` | `MigrationFailedException` | Outside step again, then pages from the checkpoint |
 | Killed after the `APPLIED` commit, before the release | `APPLIED` | (process gone) | Fast path if nothing else is due; otherwise waits up to one lease for the lock |
-| Lock lost mid-run | `RUNNING` stays (a run that lost the lock writes nothing more); committed pages stay | `LockLostException` | The process that takes the lock resumes the migration |
+| Lock lost mid-run | `RUNNING` stays (a run that lost the lock writes nothing more); committed pages stay. When a step error coincides with the loss and no other run has taken over, `FAILED` with that error | `LockLostException`, with the step's error as its cause when there is one | The process that takes the lock resumes the migration |
 | Lock wait timeout | Nothing | `LockTimeoutException` | Waits again |
 | History write fails | Depends on the write ([below](#history-write-fails)) | The driver's exception, unchanged | Retries |
 | Standalone server, transactional step due | Nothing | `TransactionsUnsupportedException`, before the lock | Same until the server is a replica set |
 | Out of order under `OutOfOrder.FAIL` | Nothing | `PlanConflictException` | Same until resolved |
+| An adoption gap under `OutOfOrder.FAIL` | The `ADOPTED` documents | `PlanConflictException`, under the lock, after the hook ran | Calls the hook again, records only what is new, and refuses while the gap remains |
 | Partially superseded squash | Nothing | `PlanConflictException` | Same until the previous release is deployed |
 | Unknown applied ids under `UnknownApplied.FAIL` | Nothing | `PlanConflictException` | Same |
 | Untracked database | Nothing (the lock document is written) | `UntrackedDatabaseException` | Same until resolved |
@@ -157,7 +158,7 @@ godwit.core.MigrationFailedException: Migration 001-initial-setup failed in OUTS
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -192,7 +193,7 @@ creating `products`.
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -549,7 +550,7 @@ ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 e
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -592,12 +593,20 @@ migration), the next start would take the fast path and start at once, ignoring 
 A network partition cuts the holder off during `006-order-totals` for longer than the lease
 ([locking.md](locking.md#losing-the-lock-mid-run) has the full timeline).
 
-**What happens.** The holder's renewals fail; its local deadline passes; its next lock check throws. The open page's
-transaction aborts. The run writes nothing more to history and throws:
+**What happens.** The holder's renewals fail, each logging `WARN Lock renewal failed`; its local deadline passes; its
+next lock check throws. The open page's transaction aborts. The run writes nothing more to history and throws:
+
+```text
+WARN  godwit - Lost migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 reason=DEADLINE_PASSED
+ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 error=godwit.core.LockLostException: Lost the migration lock while running 006-order-totals
+WARN  godwit - Lock release failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
+```
 
 ```text
 godwit.core.LockLostException: Lost the migration lock while running 006-order-totals
 ```
+
+The release in `finally` cannot reach the database either; the lease ends on its own.
 
 **After.** `006` is `RUNNING` with the checkpoint of the last committed page, owned by the lost run's token.
 
@@ -607,7 +616,28 @@ If the lost run's last commit was still in flight, the owner fence makes it eith
 new run resumes after it) or fail; no page commits twice.
 
 **What you do.** Nothing, unless lock losses repeat: then the network or the replica set is the problem, or the lease is
-too short for the deployment's failovers ([locking.md](locking.md#edge-cases)).
+too short for the deployment's failovers ([locking.md](locking.md#edge-cases)). `Lock renewal failed` lines without a
+`Lost migration lock` mean the run kept the lock through a short outage; they are worth an alert when they repeat.
+
+**A step error at the same moment.** A stop-the-world pause of 70 s freezes the holder while `005-customer-external-ids`
+calls the identity provider. When the process resumes, the HTTP call fails with its own timeout, and the lock is lost:
+its local deadline passed during the pause. No other process was waiting, so nobody has taken `005` over. godwit sends
+the `FAILED` write, fenced on its owner token and on `RUNNING`; it matches, so `lastError` records the HTTP error, and
+`migrate` throws `LockLostException` with that error as its cause:
+
+```text
+WARN  godwit - Lost migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 reason=DEADLINE_PASSED
+ERROR godwit - Migration failed id=005-customer-external-ids step=OUTSIDE_TRANSACTION attempts=1 error=java.net.http.HttpTimeoutException: request timed out
+```
+
+```text
+godwit.core.LockLostException: Lost the migration lock while running 005-customer-external-ids
+Caused by: java.net.http.HttpTimeoutException: request timed out
+```
+
+`005` is `FAILED` with that `lastError`, and the next start retries it, outside step first, keeping `lastError` until
+it applies. Had another process taken `005` over before the write, the write would match nothing: history would show
+that process's run, and the HTTP error would remain in the exception's cause and the `Migration failed` line.
 
 ### Lock wait timeout
 
@@ -651,7 +681,7 @@ never trusts the exception alone. Its `FAILED` write matches only a document tha
 owner token; when it matches nothing, godwit reads the document on the primary. `APPLIED` with this run's token means
 the commit applied: godwit reports the migration as applied and continues, so the next start does not run its
 transactional step a second time. Anything else means another run owns the document: godwit writes nothing more and
-throws `LockLostException`.
+throws `LockLostException`, with the step's error as its cause.
 
 **What you do.** Fix the connectivity or the permissions (a database user without write access to `godwit-history`
 fails with `Unauthorized`, 13). godwit retries everything on the next start.
@@ -690,6 +720,13 @@ godwit.core.PlanConflictException: Migrations cannot run against this database:
 ```
 
 Nothing ran. Production never sees this: there, both are pending and run in list order.
+
+An adoption gap is the same conflict
+([adopting-an-existing-database.md](adopting-an-existing-database.md#a-gap-in-the-adopted-ids)). While `adoptApplied` is
+configured and history holds nothing but `ADOPTED` documents, godwit checks it under the lock, after the hook has run
+and its ids are recorded, not before the lock. A gap that the hook fills, such as the one an interrupted adoption on a
+standalone server leaves, is therefore neither refused under `OutOfOrder.FAIL` nor run under `OutOfOrder.RUN`: the
+plan that runs is made after the hook has recorded the missing ids.
 
 **What you do.** If `007` has applied nowhere, renumber it `009-product-slugs`; the list is then in order everywhere.
 Otherwise, and when `007` does not depend on running before `008` (they touch different collections here), let staging
@@ -751,7 +788,11 @@ Other cases of the same exception:
 
 - The backup was of a database godwit already tracked, but the restore left out `godwit-history`: restore that
   collection too.
-- The database's state matches a known point and has no record of it: `markApplied` each applied id, with a reason.
+- The database's state matches a known point and has no record of it: stop every instance, then `markApplied` each
+  applied id with a reason, the last-listed first, as for
+  [a database whose history was lost](adopting-an-existing-database.md#history-is-lost-while-the-hook-is-configured).
+  The first mark turns the guard off: marked first-listed first, a start between two marks would find a valid prefix
+  and run the rest over the live data.
 - The database holds only collections every migration is known to handle (an empty copy, a scratch database):
 
 ```kotlin
@@ -793,9 +834,20 @@ The rules are in [ordering-and-validation.md](ordering-and-validation.md).
 `markApplied(id, reason)` records a once-only migration as `APPLIED` with origin `MARKED`, without running it. Use it
 when the migration's effect is already in the database, or must never be applied to this database, and code cannot
 express that. It refuses a repeatable or every-start migration (`IllegalArgumentException`): those are due again on the
-next start whatever their history says, so the way past one is code. Mark ids in list order: marking an id while
-once-only migrations listed before it are pending makes those out of order
+next start whatever their history says, so the way past one is code. Marking an id while once-only migrations listed
+before it are pending makes those out of order, so mark an id after the migrations before it have applied. To record
+several applied ids at once, stop every instance and mark the last-listed first, so that a start between two marks
+refuses as out of order instead of running the ids not yet marked
 ([history-and-reports.md](history-and-reports.md#markappliedid-reason)).
+
+On a `Godwit` built with `adoptApplied`, it also refuses while adoption has not ended: history is empty or holds only
+`ADOPTED` documents, so the hook still runs on every start that takes the lock. It throws `IllegalStateException` under
+the lock and writes nothing, because a `MARKED` document would end adoption before the hook has recorded every applied
+id, and the ids it has not recorded would run over the live data. A repair on such a database, such as recording what
+was applied after its history was lost while the old record remains, stops every instance and marks from a `Godwit`
+built from the same configuration with `adoptApplied = null` (`config.copy(adoptApplied = null)`), so that the marks
+land in the app's own history and lock collections, the last-listed id first
+([adopting-an-existing-database.md](adopting-an-existing-database.md#history-is-lost-while-the-hook-is-configured)).
 
 During an incident on 2026-10-05, an operator built `008`'s index on `customers.emailLower` (unique, partial on
 `emailLower` existing) by hand, named `emailLower_unique`. The next release ships `008-customer-email-lower-index`,
@@ -903,8 +955,8 @@ is correct.
 
 **The `adoptApplied` hook throws.**
 The hook reads `schema-log` and finds a document without `version`; `getString` returns null and building the set
-throws. The exception propagates from `migrate` unchanged, under no migration's name. Nothing was recorded, so history
-is still empty and the next start calls the hook again. Fix the hook or the data
+throws. The exception propagates from `migrate` unchanged, under no migration's name. Nothing was recorded, and history
+still holds nothing that adoption did not write, so the next start calls the hook again. Fix the hook or the data
 ([adopting-an-existing-database.md](adopting-an-existing-database.md)).
 
 **Unknown applied ids under `UnknownApplied.FAIL`.**

@@ -1,7 +1,9 @@
 # godwit
 
 **Status: pre-release.** No version is published yet. The API on this page and in [docs](docs/) is designed and
-compile-checked; the implementation follows the [implementation plan](docs/development/implementation-plan.md).
+compile-checked; the implementation follows the [implementation plan](docs/development/implementation-plan.md). The
+first release is `0.1.0`, and godwit stays on 0.x until it has run in a production application
+([DD-25](docs/design-decisions.md#dd-25-0x-until-proven-in-production)).
 
 godwit runs MongoDB schema and data migrations for Kotlin JVM applications. A migration is a plain Kotlin value, built
 by a chain of calls, and an application lists its migrations in a plain `List<Migration>`: the list is the registry
@@ -26,8 +28,8 @@ rolls forward only. godwit-core has two runtime dependencies: the MongoDB Kotlin
 
 | Requirement | Version | Notes |
 |---|---|---|
-| JDK | 21 or later | |
-| Kotlin | 2.4 or later | godwit is built with Kotlin 2.4.20; the lowest consumer version is confirmed before the first release ([implementation plan](docs/development/implementation-plan.md#decisions-needed-before-p0)) |
+| JDK | 21 or later | godwit's bytecode targets Java 21 ([DD-26](docs/design-decisions.md#dd-26-jvm-21-and-kotlin-24)) |
+| Kotlin | 2.4 or later | godwit is built with Kotlin 2.4.20 and supports consumers that compile with Kotlin 2.4 or later ([DD-26](docs/design-decisions.md#dd-26-jvm-21-and-kotlin-24)) |
 | MongoDB Kotlin sync driver | 5.7.0 | `org.mongodb:mongodb-driver-kotlin-sync`, an `api` dependency of godwit-core: the driver's types are in godwit's API |
 | MongoDB server | 4.4 or later | See [compatibility](docs/architecture.md#compatibility) |
 | Replica set or sharded cluster | | Needed when a transactional step (`inTransaction`, `inBatches`) is due. A single-node replica set is enough; outside-only migrations also run on a standalone server |

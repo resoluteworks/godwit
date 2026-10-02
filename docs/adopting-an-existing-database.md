@@ -6,7 +6,8 @@ A database that was migrated before godwit, by another tool or by hand, has no g
 
 - Write `(MongoDatabase) -> Set<String>`: it reads whatever record your database carries and returns the applied ids, spelled as the ids in your migration list.
 - Pass it as `GodwitConfig(adoptApplied = ...)`.
-- godwit calls it under the lock, once, and only while its history collection is empty. It records what the hook returns all at once, so an interrupted adoption records nothing and the next start calls the hook again.
+- godwit calls it under the lock, on a start that has work due, while its history collection holds nothing but `ADOPTED` documents (an empty collection included). It records the ids history does not hold yet, with idempotent upserts, so an interrupted adoption completes on the next start, which calls the hook again.
+- The first history document that adoption did not write (a migration that ran, a squash recorded as superseded, a `markApplied`) ends adoption: while such a document exists, the hook is not called. godwit decides from the history each start reads, so deleting every document that adoption did not write reopens adoption. Until adoption ends, the hook can be called more than once, so it must only read, and `markApplied` on a `Godwit` built with the hook refuses (`IllegalStateException`), so that a mark cannot end adoption before the hook has recorded the applied ids.
 - Ids that the list declares as once-only (or names in a `supersedes` list) are recorded `APPLIED` with origin `ADOPTED`. Every other returned id is logged and not recorded.
 - If the database has collections, no godwit history and the hook adopts nothing, `migrate` throws `UntrackedDatabaseException` before anything runs. A forgotten or mistyped hook cannot re-run your migrations over live data.
 
@@ -61,14 +62,16 @@ fun migrateWithAdoption(client: MongoClient, config: ShopConfig, identity: Ident
 | Parameter | The `com.mongodb.kotlin.client.MongoDatabase` that `Godwit` migrates, from the cluster you passed to `Godwit`. |
 | Result | A `Set<String>` of ids. Matching is exact and case-sensitive. |
 | Reads | Whatever you like. A collection that does not exist reads as empty, so the hook is safe on a new database. |
-| Writes | None. The hook only reads. |
-| Runs | Under the migration lock, so no other instance migrates while it reads. The lock's heartbeat keeps the lease alive however long the read takes. |
+| Writes | None. The hook only reads, and returns the same set for the same old record: godwit can call it more than once. |
+| Runs | Under the migration lock, on a start that has work due, while every history document is `ADOPTED` (or there is none). No other instance migrates while it reads, and the lock's heartbeat keeps the lease alive however long the read takes. |
 | Fails | An exception from the hook propagates out of `migrate`. The lock is released and nothing is recorded; the next start calls the hook again. |
-| Is recorded | After the hook returns, godwit checks the lock and writes every `ADOPTED` document in one transaction. A process that dies while it records them leaves history empty, and the next start calls the hook again. |
+| Is recorded | After the hook returns, godwit checks the lock and writes an `ADOPTED` document for every adoptable id that history does not hold yet, with an upsert that only inserts: a document that already exists is left as it is. On a replica set the documents go in one transaction, which the driver retries in the same call after a transient error such as a primary stepdown. On a standalone server they go one at a time, with a lock check before each, last-listed first: in the reverse of the list's once-only order, where each migration is preceded by the ids its `supersedes` list names. A process that dies while it records them leaves the adoption incomplete, and the next start calls the hook again and records what is missing. |
 
 ### Leaving the hook in place
 
-The hook costs nothing once a database is adopted. godwit decides whether to call it from the history it reads on every start anyway, so a database with history never runs it, and a new database runs it once against a collection that does not exist. The same configuration adopts every environment, however old its database is.
+The hook costs nothing once adoption is over. godwit decides whether to call it from the history it reads on every start anyway: it calls the hook on a start that has work due while history holds nothing but `ADOPTED` documents, and not while history holds a document of another origin (`RAN`, `SUPERSEDED` or `MARKED`). The hook runs on the adopting start. When that start also runs something, adoption ends there: the shop's first start always does, because its repeatable and its every-start migration run on it, and a new database runs the hook once against a collection that does not exist. When the adopting start runs nothing else (the adopting release adds no migrations, per step 2 of the rollout, and the list has no repeatable or every-start migration), adoption stays open: every instance that waited for the lock calls the hook again, and so does the first start of the next release with work due, before it runs anything. The same configuration adopts every environment, however old its database is.
+
+Until a migration has run on the database (or one has been marked, or a squash recorded), the hook runs again on every start that takes the lock: after a refused gap, after an interrupted adoption, or on a later release when the adopting start ran nothing. Each of those starts pays for the read under the lock, and a start with nothing due takes the fast path and does not call it. That is why the hook must be a pure read: no writes, no calls to other services, and the same result for the same old record. A call that returns ids already recorded records nothing; a call that returns fewer ids removes nothing (see "The hook returns a different set on a later call").
 
 There is one reason to remove it later: a database that loses its history while the hook is configured is adopted again from the old record, and replays everything godwit applied since (see "History is lost while the hook is configured"). Without the hook, the untracked-database guard refuses that database instead. Remove the hook when every environment is adopted and no old release can be deployed.
 
@@ -159,6 +162,8 @@ The adopted once-only ids must form a prefix of the list's once-only order. With
 
 A migration in the list assumes the ones before it. A database where `003` is applied and `002` is not is in a state nobody tested. The policy is `GodwitConfig.outOfOrder`: `FAIL` (the default) throws `PlanConflictException` and runs nothing; `RUN` runs the missing migrations in list order and records `outOfOrder: true` on them. See [ordering-and-validation.md](ordering-and-validation.md).
 
+godwit checks the prefix after the hook has run. Out-of-order and partially superseded squashes are normally checked before the lock, but while the hook is configured and history holds nothing but `ADOPTED` documents, those two checks wait until the hook has run under the lock and its ids are recorded. A gap that the hook fills, such as the one an interrupted adoption leaves, is therefore never reported; a gap that remains after the hook follows the policy.
+
 ## The untracked-database guard
 
 When godwit's history is empty, the database has at least one collection that is not godwit's, and the hook adopted nothing (or there is no hook), `migrate` throws `UntrackedDatabaseException`. The exception lists the collections it found:
@@ -203,9 +208,9 @@ Adoption touches production once, on the first start of the first godwit release
 3. **Compare the hook with the list** (below). Anything the hook returns that the list will not import is a typo or an obsolete task.
 4. **Rehearse on a restored copy of production** (below). The result must show exactly the ids you expect adopted and exactly the migrations you expect to run.
 5. **Leave `untrackedDatabase` at `REFUSE`.** The rehearsal proves the hook works on a copy; the guard protects the deployment if production differs from the copy.
-6. **Deploy.** The first instance takes the lock, adopts and runs what is left. The others wait and, when they get the lock, find nothing to adopt (see "Two instances start at once").
-7. **Verify.** `history()` holds an `ADOPTED` document per imported id, `status(migrations).isUpToDate` is true, and the logs contain `Adopted applied migrations`.
-8. **Keep the old record.** Do not delete or edit it while any old release can still run.
+6. **Deploy.** The first instance takes the lock, adopts and runs what is left. The others wait. When the first start ran something, they find it in history when they get the lock and do not call the hook; when it ran nothing, history holds only `ADOPTED` documents, and each of them calls the hook again and records nothing new (see "Two instances start at once").
+7. **Verify.** `history()` holds an `ADOPTED` document per imported id, `status(migrations).isUpToDate` is true, and the logs contain `Adopted applied migrations`. Then check whether adoption has ended: `history()` holds a document that adoption did not write. If every document is `ADOPTED`, adoption is still open, and the next start with work due calls the hook again (see "Leaving the hook in place").
+8. **Keep the old record.** Do not delete or edit it while any old release can still run. While the hook is configured, keep it readable and unchanged until history holds a document that adoption did not write, or remove the hook first.
 
 ### Compare the hook with the list
 
@@ -269,7 +274,7 @@ The result for the shop's `schema-log` is `adopted = [001-initial-setup, 002-car
 
 ### Dry run
 
-`status()` does not call the hook. On a database with no godwit history it lists every once-only migration as pending, because adoption runs only inside `migrate`. That is expected, and it means `status()` cannot preview an adoption. The preview is the rehearsal in step 4 plus the comparison in step 3. After the first `migrate`, `status()` is accurate: it lists exactly what the next start would run, without taking the lock or writing.
+`status()` does not call the hook. On a database with no godwit history it lists every once-only migration as pending, because adoption runs only inside `migrate`. That is expected, and it means `status()` cannot preview an adoption. The preview is the rehearsal in step 4 plus the comparison in step 3. Once history holds a document that adoption did not write, `status()` is accurate: it lists exactly what the next start would run, without taking the lock or writing. While it holds only `ADOPTED` documents and the hook is configured, `status()` lists the ids adoption has not recorded as pending, even those the next start will adopt, and reports no out-of-order or partial-squash problem that the next start may refuse ([history-and-reports.md](history-and-reports.md#edge-cases)).
 
 ### The transition period with old instances
 
@@ -282,7 +287,7 @@ During a rolling deploy, instances of the old release run next to instances of t
 | You roll back to the old release after the new one ran | The old release does not know what godwit applied since | Safe if the adopting release added no migrations; otherwise write the change so the old code tolerates it |
 | Both sides start at the same moment | They use different locks and the old side has nothing pending | Nothing, for the same reason |
 
-Remove the old tool, and stop keeping its record, only when no old release can be deployed again.
+Remove the old tool, and stop keeping its record, only when no old release can be deployed again and, while the hook is configured, history holds a document that adoption did not write: until then the hook reads the record on every start with work due.
 
 ## Edge cases
 
@@ -309,20 +314,32 @@ Each case gives the state, what godwit does, and what you do.
 ### A gap in the adopted ids
 
 - **State:** the old record holds `001-initial-setup` and `003-file-store`. `002-carts` was never applied there.
-- **godwit:** records the two adopted ids, then checks the plan and finds `002-carts` pending before the applied `003-file-store`. Under `OutOfOrder.FAIL` it throws `PlanConflictException`, naming both. The adopted documents stay in history, because they were written before the plan was checked, and the hook is not called again on the next start.
+- **godwit:** records the two adopted ids, then checks the plan and finds `002-carts` pending before the applied `003-file-store`. Under `OutOfOrder.FAIL` it throws `PlanConflictException`, naming both. The adopted documents stay in history, because they were written before the plan was checked. History holds nothing but `ADOPTED` documents, so every following start calls the hook again, records nothing new and refuses the same gap, until one of the answers below changes the state.
 - **You:** decide what the gap means.
-  - `002-carts` was applied by hand and nobody recorded it: record it with `markApplied`, then start again.
+  - `002-carts` was applied by hand and nobody recorded it: record it with `markApplied` from a `Godwit` built from the shop's configuration with `adoptApplied = null` (below), then start again. The shop's own `Godwit` refuses the mark, because history holds nothing but `ADOPTED` documents and adoption has not ended. The `MARKED` document ends it, so mark only once the hook returns everything it should.
+  - `002-carts` was applied and the old record or the hook misses it: correct the record or the hook and start again. The hook runs again and adopts `002-carts`.
   - `002-carts` really is missing and safe to run now: start once with `adoptAndRunGaps` (`OutOfOrder.RUN`, shown above). It runs `002-carts` and records `outOfOrder: true`. Switch back to the default afterwards.
-  - The hook is wrong: history holds nothing but `ADOPTED` documents at this point, because nothing has run. Drop the history collection, fix the hook, and start again.
+  - The hook returns an id that is not applied: history holds nothing but `ADOPTED` documents at this point, because nothing has run, and adoption never removes a recorded id. Drop the history collection, fix the hook, and start again.
 
-`markApplied` writes the id with origin `MARKED` and the reason, under the lock:
+`markApplied` writes the id with origin `MARKED` and the reason, under the lock. The `Godwit` it runs on is built from the shop's own `GodwitConfig` with the hook removed (`copy(adoptApplied = null)`). Every other setting stays, above all `historyCollection` and `lockCollection`: a `Godwit` built with the defaults on an app that names its own collections would mark in a history that the app never reads, under a lock that the app never takes.
 
 ```kotlin
+import com.example.shop.ShopConfig
+import com.mongodb.kotlin.client.MongoClient
 import godwit.core.Godwit
+import godwit.core.GodwitConfig
 
-/** Records a change that someone applied by hand, with the reason in history. */
-fun recordHandAppliedChange(godwit: Godwit) {
-    godwit.markApplied("002-carts", reason = "created by hand on 2026-03-02, see ticket SHOP-212")
+/**
+ * Records a change that someone applied by hand, with the reason in history. [godwitConfig] is the configuration the
+ * shop starts with. The copy drops adoptApplied, because the shop's own Godwit refuses to mark while history holds
+ * nothing but ADOPTED documents, and keeps every other setting, so the mark lands in the shop's history and lock
+ * collections.
+ */
+fun recordHandAppliedChange(client: MongoClient, config: ShopConfig, godwitConfig: GodwitConfig) {
+    Godwit(client, config.mongo.database, godwitConfig.copy(adoptApplied = null)).markApplied(
+        "002-carts",
+        reason = "created by hand on 2026-03-02, see ticket SHOP-212"
+    )
 }
 ```
 
@@ -344,22 +361,28 @@ fun recordHandAppliedChange(godwit: Godwit) {
 - **godwit:** the history is empty, so it calls the hook. `schema-log` does not exist, the read is empty, the database has no collections, so the guard passes. Every migration runs.
 - **You:** nothing. The hook is safe on an empty database as long as it tolerates a missing collection.
 
-### History is not empty
+### The hook changes after migrations ran
 
-- **State:** the database was adopted last month. Someone edits the hook to return one more id.
-- **godwit:** does not call the hook. The history collection is not empty, so the hook has no effect. Neither does a change to the old record.
-- **You:** if an id must be recorded after the first start, use `markApplied(id, reason)`.
+- **State:** the database was adopted last month, and migrations have run since. Someone edits the hook to return one more id.
+- **godwit:** does not call the hook. History holds documents that adoption did not write (the migrations that ran), so adoption is over and the hook has no effect. Neither does a change to the old record.
+- **You:** if an id must be recorded after that, use `markApplied(id, reason)`.
+
+### The hook returns a different set on a later call
+
+- **State:** the first start adopted `001-initial-setup` and `003-file-store` and refused the gap before `003`. Before the next start, someone corrects `schema-log`: rows for `002-carts` and `004-order-status` are added, and the `003-file-store` row is deleted by mistake.
+- **godwit:** history holds nothing but `ADOPTED` documents, so the next start calls the hook again. It records the ids that are new (`002-carts`, `004-order-status`), leaves `001` and `003` as they are, and checks the plan: no gap. `003-file-store` stays recorded although the hook no longer returns it: adoption only adds, and nothing is ever removed.
+- **You:** nothing, when the additions are right. To take back an id that was adopted wrongly, drop the history collection while it still holds only `ADOPTED` documents, fix the hook or the record, and start again.
 
 ### History is lost while the hook is configured
 
 - **State:** the shop was adopted in March, godwit has run `004` to `006` since, and someone drops `godwit-history`. The hook is still configured and the old record still lists `001` to `003`.
 - **godwit:** history is empty, so the hook runs and returns `001` to `003`. It adopts three, and `004` to `006` are pending again and run a second time. The guard does not help, because adoption imported something.
-- **You:** restore `godwit-history` from a backup. Without one, record what was applied before starting the app: `markApplied` for each of `001` to `006`. The first call makes history non-empty, so the hook is skipped. Prevention: once every environment is adopted, remove the hook. The guard then refuses a database that lost its history, instead of replaying it.
+- **You:** restore `godwit-history` from a backup. Without one, stop every instance and record what was applied before any of them starts again, from a `Godwit` built from the shop's configuration with `adoptApplied = null`, so that the marks land in the shop's `godwit-history` ([as in the gap case](#a-gap-in-the-adopted-ids)): the shop's own `Godwit` refuses to mark, because history is empty and adoption has not ended. Call `markApplied` for each of `006` down to `001`, the last-listed id first. The first call records a `MARKED` document, which ends adoption, so when the instances start again the hook is not called. Marking in that order means a start between two marks sees the ids not yet marked as pending before a marked one, which the default `OutOfOrder.FAIL` refuses; marked from `001` up, the same start would find a valid prefix and run the rest over the live data. Prevention: once every environment is adopted, remove the hook. The guard then refuses a database that lost its history, instead of replaying it.
 
 ### Two instances start at once
 
 - **State:** two instances of the new release start against the unadopted production database.
-- **godwit:** instance A takes the lock and adopts. Instance B waits. When B gets the lock it reads history again, finds it non-empty, does not call the hook, plans, and finds only the every-start migration due.
+- **godwit:** instance A takes the lock, adopts, and runs what is left. Instance B waits. When B gets the lock it reads history again, finds the migrations A ran, does not call the hook, plans, and finds only the every-start migration due.
 
 ```text
 INFO  godwit - Acquired migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f lockWaitMs=14
@@ -373,24 +396,40 @@ INFO  godwit - Acquired migration lock runId=0199a4c2-8e44-7a02-b1d5-6c7d8e9fa0b
 INFO  godwit - Migrations complete runId=0199a4c2-8e44-7a02-b1d5-6c7d8e9fa0b1 ran=1 recorded=0 upToDate=7 lockWaitMs=14230 durationMs=96
 ```
 
-- **You:** nothing. The hook runs once per database however many instances start.
+- **You:** nothing. The hook runs once per database however many instances start, as long as the first start runs something. When it does not (it adopted the whole list and the list has no repeatable or every-start migration, or it refused a gap), history still holds only `ADOPTED` documents and B calls the hook again under the lock; that call records nothing new.
 
 ### The process dies while adoption records its ids
 
 - **State:** the hook returned `001` to `004`, and the pod is killed, or the primary steps down, while godwit records them.
-- **godwit:** the four `ADOPTED` documents commit in one transaction, so none of them is recorded. History is still empty; the next start calls the hook again and adopts all four. On a standalone server, which has no transactions, godwit writes them one at a time, `004-order-status` first: an interruption there leaves a gap before a recorded id, and the next start refuses it as out of order (`PlanConflictException`) instead of running `001` to `003` again.
-- **You:** nothing on a replica set. After a refusal on a standalone server, history holds only `ADOPTED` documents: drop the history collection and start again.
+- **godwit:** on a replica set the four `ADOPTED` documents commit in one transaction: either all are recorded or none. The transaction runs in the driver's `withTransaction`, so a transient error such as the primary stepping down is retried in the same call; a kill, or an error that is not transient, leaves the commit applied or not. The next start calls the hook again and records whatever is missing (nothing, if the commit applied). On a standalone server, which has no transactions (and so runs only lists whose due migrations are outside-only), godwit writes them one at a time, `004-order-status` first; an interruption after two writes leaves `004` and `003` recorded and `001` and `002` missing. The next start finds history holding nothing but `ADOPTED` documents, so it does not check the order before the lock. Under the lock it calls the hook again, records `001` and `002`, leaves `003` and `004` as they are, and only then checks the plan, which has no gap. This holds under `OutOfOrder.FAIL` and `OutOfOrder.RUN` alike: the missing ids are adopted, never run.
+- **You:** nothing. Keep the hook configured until the first start has completed. A start without it sees the partial adoption as a gap before `003-file-store`, because the ids are written last-listed first: `OutOfOrder.FAIL` refuses it, while `OutOfOrder.RUN` would run `001` and `002` over data that already has them. Ids that a `supersedes` list names take their migration's place in that order, so an interruption among them leaves a partial supersede, which a start without the hook refuses whatever `outOfOrder` is.
+
+### `markApplied` before the first start
+
+- **State:** before the first godwit release starts on production, an operator runs `markApplied("002-carts", reason = ...)` on a `Godwit` configured like the shop's, with `adoptApplied`, to record a change made by hand.
+- **godwit:** takes the lock and reads history: it is empty and the hook is configured, so adoption has not ended. A `MARKED` document is not an adoption document, so it would end adoption before it began: the hook would never be called, and with history no longer empty, the untracked-database guard would be off as well. With `002-carts` marked, `001-initial-setup` would be out of order, which `OutOfOrder.FAIL` refuses and `OutOfOrder.RUN` runs, with everything after `002`, over the live data; with `001-initial-setup` marked, `002` to `006` would run over the live data. `markApplied` therefore throws and writes nothing:
+
+```text
+java.lang.IllegalStateException: adoption has not ended on this database; run migrate() first so the adoptApplied hook adopts, or call markApplied from a Godwit built without adoptApplied
+```
+
+- **You:** work out what the first start does with the id. It adopts what the hook returns, refuses a gap under the default `OutOfOrder.FAIL`, and runs the once-only migrations listed after the last adopted id, so where the id sits decides the answer.
+  - The hook returns it: there is nothing to mark.
+  - It is listed before an id the hook returns, as `002-carts` is before `003-file-store`: let the first start adopt, then mark. The first start adopts the rest, refuses the gap before `003-file-store` under the default `OutOfOrder.FAIL`, runs nothing, and leaves history holding only `ADOPTED` documents: mark from a `Godwit` built from the shop's configuration with `adoptApplied = null`, as in [the gap case](#a-gap-in-the-adopted-ids). Under `OutOfOrder.RUN` the first start would run the id instead, so treat it as the next case.
+  - It is listed after every id the hook returns, as `004-order-status` is when the old record lists `001` to `003`: do not wait for the first start, because it adopts `001` to `003`, finds a valid prefix and runs `004-order-status` a second time over the live orders, before anyone can mark it. Make the hook return the id, or add it to the old record, as in the gap case's answer for an id the old record or the hook misses. Then start: the hook adopts it with the rest, and nothing is marked.
+
+  Once a migration has run, the shop's own `Godwit` marks. A `Godwit` built without the hook does not refuse: a mark from it before the first start ends adoption as described above. If such a mark came first, delete its document in the shell before any instance starts, which is safe because nothing ran under it (`db.getCollection("godwit-history").deleteOne({ _id: "002-carts", origin: "MARKED" })`). History is then empty again, and the next start calls the hook.
 
 ### The hook throws
 
 - **State:** the shop's database user cannot read `schema-log`, and the read throws.
 - **godwit:** the exception propagates out of `migrate`, the lock is released and nothing is recorded. The application does not start.
-- **You:** fix the permission. The next start calls the hook again, because history is still empty.
+- **You:** fix the permission. The next start calls the hook again, because history still holds nothing that adoption did not write.
 
 ### Adoption succeeds and a later migration fails
 
 - **State:** `001` to `004` are adopted; `005-customer-external-ids` fails because the identity provider is down.
-- **godwit:** `005` is recorded `FAILED` with `lastError`. History is not empty, so the next start does not call the hook. It retries `005`, outside step first.
+- **godwit:** `005` is recorded `FAILED` with `lastError`. Its document has origin `RAN`, written by its `RUNNING` marker, so adoption is over and the next start does not call the hook. It retries `005`, outside step first.
 - **You:** fix the cause and restart. Adoption is complete and independent of what runs after it.
 
 ### An id is spelled differently
@@ -414,7 +453,7 @@ INFO  godwit - Migrations complete runId=0199a4c2-8e44-7a02-b1d5-6c7d8e9fa0b1 ra
 ### A hotfix on the old release adds a change after adoption
 
 - **State:** after adoption, someone patches the old release, and its old tool applies a new change `005b-hotfix` to the production database.
-- **godwit:** does not know it. History is not empty, so the hook is not called, and nothing in godwit's list names `005b-hotfix`.
+- **godwit:** does not know it. Once a migration has run, the hook is not called; and while it still is, nothing in godwit's list names `005b-hotfix`, so it would be ignored.
 - **You:** do not add changes through the old tool after adoption. If it happened, add a migration with the same effect to the godwit list, make it safe to run on a database that has the change, and let it run.
 
 ### `status()` before the first start
@@ -445,11 +484,11 @@ INFO  godwit - Migrations complete runId=0199a4c2-8e44-7a02-b1d5-6c7d8e9fa0b1 ra
 
 **Why:** the hook is a few lines of Kotlin that you own, test and delete. godwit stays independent of every other tool, and any record that you can read can be adopted.
 
-### The hook runs only while history is empty
+### The hook runs until something other than adoption is recorded
 
-**Chosen:** godwit calls it under the lock, and only while the history collection is empty.
+**Chosen:** godwit calls it under the lock while history holds nothing but `ADOPTED` documents, records only the ids history does not hold yet, and checks the order after it.
 
-**Alternatives:** an explicit second call at startup (`godwit.adopt(...)`), or reconciliation on every start.
+**Alternatives:** an explicit second call at startup (`godwit.adopt(...)`), reconciliation on every start, or a call only while history is empty.
 
 ```text
 // not godwit API
@@ -458,7 +497,15 @@ godwit.adopt(::appliedBeforeGodwit)   // a second startup step that someone must
 godwit.migrate(migrations)
 ```
 
-**Why:** after the first start, godwit's history is the only source of truth. A call that reads the old record on every start would let that record disagree with history. A separate call is a second step to forget, to order wrongly or to leave in. With the hook in the config, a database that is already adopted costs nothing, and the same code adopts every environment. Because the hook runs only while history is empty, the adopted documents commit together: a partial adoption would make history non-empty and keep the hook from running again.
+**Why:** once a migration has run, godwit's history is the only source of truth. A call that reads the old record on every start would let that record disagree with history. A separate call is a second step to forget, to order wrongly or to leave in. With the hook in the config, a database that is already adopted costs nothing, and the same code adopts every environment. A call only while history is empty cannot finish an adoption that a crash interrupted on a standalone server, where the documents are written one at a time: the first recorded id would keep the hook from running again. Calling it until the first document of another origin, with upserts of what is missing, lets the next start finish the adoption, and checking the order after the hook keeps the half-recorded state from being refused as a gap before the hook can fill it.
+
+### `markApplied` refuses until adoption ends
+
+**Chosen:** on a `Godwit` built with `adoptApplied`, `markApplied` throws `IllegalStateException` and writes nothing while history holds no document that adoption did not write (an empty history included). The check runs under the lock that `markApplied` takes anyway, on the history it reads there.
+
+**Alternative:** accept the mark and document the hazard.
+
+**Why:** a `MARKED` document ends adoption. Accepted before the hook has recorded every applied id, a mark keeps the hook from ever recording the rest, and the next start runs them over the live data, or refuses as out of order an id the hook would have adopted. That happens on exactly the databases adoption exists to protect, and a warning on a page does not reach the operator who runs the command. The refusal costs one exception whose message names both ways forward: let `migrate` adopt first, or mark from a `Godwit` built from the same configuration without the hook, a deliberate choice for a repair such as recording what was applied after history was lost, with every instance stopped.
 
 ### Only declared ids are imported
 
@@ -508,7 +555,7 @@ godwit.migrate(migrations)
 - [ordering-and-validation.md](ordering-and-validation.md): the out-of-order policy.
 - [history-and-reports.md](history-and-reports.md): `ADOPTED` documents, `status()`, `markApplied`.
 - [failure-and-recovery.md](failure-and-recovery.md): the untracked database and plan conflicts as failure modes.
-- [locking.md](locking.md): why the hook runs under the lock.
+- [locking.md](locking.md#adoption-under-the-lock): why the hook runs under the lock.
 - [concepts.md](concepts.md): kinds, steps and the run lifecycle that adoption slots into.
 - [repeatable-migrations.md](repeatable-migrations.md): why a repeatable is not adopted and runs once on the first start.
 - [design-decisions.md](design-decisions.md): the index of all decisions.

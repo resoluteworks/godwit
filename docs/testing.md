@@ -368,6 +368,18 @@ class AdoptionSpec : StringSpec({
         db.godwit.history().map { it.origin }.toSet() shouldBe setOf(Origin.ADOPTED)
     }
 
+    "a gap closed in the old record is adopted on the next start" {
+        val db = testGodwit(GodwitConfig(adoptApplied = ::appliedBeforeGodwit))
+        db.seedSchemaLog("001-initial-setup", "003-file-store")
+        shouldThrow<PlanConflictException> { db.godwit.migrate(migrationsFor(db)) }
+
+        db.seedSchemaLog("002-carts")
+        val report = db.godwit.migrate(migrationsFor(db), target = Target.Through("003-file-store"))
+
+        report.recorded.map { it.id } shouldContainExactly listOf("002-carts")
+        report.ran.shouldBeEmpty()
+    }
+
     "OutOfOrder.RUN runs the missing migration and records it as out of order" {
         val config = GodwitConfig(adoptApplied = ::appliedBeforeGodwit, outOfOrder = OutOfOrder.RUN)
         val db = testGodwit(config)
@@ -391,7 +403,7 @@ class AdoptionSpec : StringSpec({
 
 - The first case is the normal rollout: three ids adopted, the rest run, the database up to date. It seeds a shorter `schema-log` than the walkthrough in [adopting-an-existing-database.md](adopting-an-existing-database.md), which adopts `001` to `004`, so that `004` runs on the order the test inserts.
 - The second shows an id that the list does not declare being ignored.
-- The third and fourth are the gap: refused by default, run under `OutOfOrder.RUN`. The third also pins that the adopted records stay.
+- The third, fourth and fifth are the gap. The third pins that it is refused by default and that the adopted records stay. The fourth closes the gap in `schema-log`: history still holds only `ADOPTED` documents, so the next start calls the hook again and records `002-carts`, and nothing runs. The fifth runs the missing migration under `OutOfOrder.RUN`.
 - The last shows that a new database runs everything while the hook is still configured.
 
 The guard has its own cases:

@@ -9,7 +9,7 @@ phase stops and the disagreement is resolved before code is written.
 ## Contents
 
 - [Rules for every phase](#rules-for-every-phase)
-- [Decisions needed before P0](#decisions-needed-before-p0)
+- [Decisions settled before P0](#decisions-settled-before-p0)
 - [Overview](#overview)
 - [P0. Project skeleton](#p0-project-skeleton)
 - [P1. Declarations, validation and the planner](#p1-declarations-validation-and-the-planner)
@@ -36,32 +36,36 @@ phase stops and the disagreement is resolved before code is written.
 - **Gates run on exit codes.** Each command in a gate runs only after the previous one exited 0. A gate is never one
   shell line joined with `;`. In CI each command is its own workflow step, so a failure stops the job; locally, run them
   one at a time or through a `make` target, which stops at the first failing line.
-- **The docs stay true.** Every ```kotlin block in `README.md` and `docs/` compiles against the real API from P1 on
-  (`docs-snippets` module), and every block marked "This does not compile:" fails to compile (`neg/`). A phase that
-  changes a documented behaviour changes the doc and its snippet in the same commit.
+- **The docs stay true.** Every ```kotlin block in `README.md` and `docs/` compiles in the `docs-snippets/` build
+  (against `docs-snippets/api-stubs/` until P1, against the real `godwit-core` and `godwit-test` from P1 on), and every
+  block marked "This does not compile:" fails to compile (`docs-snippets/neg/`). `scripts/check-docs.sh` runs every
+  docs check. A phase that changes a documented behaviour changes the doc and its snippet in the same commit.
 - **Every outcome leaves a trace.** Each phase names the log line, report field or test output that proves it worked.
   godwit's log lines are the catalogue in the `Godwit` KDoc; tests assert on them through a Logback `ListAppender`
   attached to the `godwit` logger.
 
-## Decisions needed before P0
+## Decisions settled before P0
 
-These are not settled by the design. Each has a recommendation; P0 starts once they are confirmed.
+These decisions shape P0 and every later phase. Each is settled: the docs and the API stubs state the outcome, and the
+last column links to where.
 
-| Decision | Options | Recommendation |
+| Decision | Outcome | Recorded in |
 |---|---|---|
-| JVM baseline | bytecode for 21, or for 17 to reach more applications | 21, the toolchain the build uses and the version the README states |
-| Kotlin consumers | require Kotlin 2.4, or compile with `apiVersion`/`languageVersion` 2.2 so older compilers can read godwit's metadata | require 2.4 for the first release; revisit when someone asks |
-| First version number | `1.0.0` (the docs' examples show `godwitVersion: "1.0.0"`), or `0.1.0` while the API settles | `1.0.0`: the API is designed and documented in full before the release |
-| Log events for lock trouble | the catalogue has no event for a failed heartbeat renewal, a detected lock loss or a failed release | add three WARN events (`Lock renewal failed`, `Lost migration lock`, `Lock release failed`) and update the catalogue and [locking](../locking.md) together |
-| Cause of `LockLostException` | no cause; or carry the step's exception when a step error and a lock loss coincide | add an optional cause, so the step's error is not lost |
-| Retiring a deleted repeatable or every-start migration | manual deletion of its history document (documented today); or a core API | keep the manual procedure for the first release |
+| JVM baseline | bytecode for Java 21 (`jvmToolchain(21)`) | [DD-26](../design-decisions.md#dd-26-jvm-21-and-kotlin-24), [README](../../README.md#requirements) |
+| Kotlin consumers | Kotlin 2.4 or later; godwit is built with 2.4.20 without lowering `apiVersion` or `languageVersion` | [DD-26](../design-decisions.md#dd-26-jvm-21-and-kotlin-24), [README](../../README.md#requirements) |
+| First version number | `0.1.0`; 0.x until godwit has run in a production application, then `1.0.0`. History examples show `godwitVersion: "0.1.0"` | [DD-25](../design-decisions.md#dd-25-0x-until-proven-in-production) |
+| Log events for lock trouble | three WARN events, `Lock renewal failed`, `Lost migration lock` and `Lock release failed`, each with `runId`, `holder` and `error` or `reason` | [history and reports](../history-and-reports.md#log-lines), [locking](../locking.md#losing-the-lock-mid-run), the `Godwit` KDoc |
+| Cause of `LockLostException` | an optional cause: when a step fails and the lock is lost at the same moment, the step's exception is the cause, and the fenced `FAILED` write records it as `lastError` unless another run has taken the migration over | [failure and recovery](../failure-and-recovery.md#lock-lost), [architecture](../architecture.md#running-one-migration) |
+| Deleting a repeatable or every-start migration from the list | the documented manual procedure for 0.1.0: delete its `godwit-history` document; no core API | [repeatable migrations](../repeatable-migrations.md#deleting-a-repeatable-or-every-start-migration), [DD-12](../design-decisions.md#dd-12-every-start-and-repeatable-migrations) |
+| When the adoption hook runs | on every start that has work due while history holds only `ADOPTED` documents, until a document of another origin exists; recording is an idempotent upsert of the ids history lacks; the out-of-order and partial-supersede checks wait until the hook has run under the lock | [DD-14](../design-decisions.md#dd-14-adoption-through-an-application-supplied-hook), [adopting an existing database](../adopting-an-existing-database.md#the-hook-runs-until-something-other-than-adoption-is-recorded) |
+| `markApplied` before adoption has ended | refused: with `adoptApplied` set and history empty or holding only `ADOPTED` documents, `markApplied` throws `IllegalStateException` ("adoption has not ended on this database; run migrate() first so the adoptApplied hook adopts, or call markApplied from a Godwit built without adoptApplied") and writes nothing; the check runs under the lock, on the same history read; a manual repair marks from a `Godwit` built from the same configuration with `adoptApplied = null` (same history and lock collections), after stopping every instance | [DD-14](../design-decisions.md#dd-14-adoption-through-an-application-supplied-hook), [adopting an existing database](../adopting-an-existing-database.md#markapplied-refuses-until-adoption-ends) |
 
 ## Overview
 
 | Phase | Delivers | Main risk it retires |
 |---|---|---|
 | P0 | a two-module build that lints, tests against a replica set in CI, measures coverage, generates docs and publishes locally | toolchain and CI surprises |
-| P1 | the whole public API surface, validation and the pure planner; docs snippets compile against it | API shape and planning rules |
+| P1 | the whole public API surface, validation and the pure planner; the docs snippets compile against it instead of the stubs | API shape and planning rules |
 | P2 | the history store and the lease lock | concurrency between processes |
 | P3 | `migrate`, `status`, `requireUpToDate`, `history` for once-only migrations; DDL helpers; error guidance | exactly-once and crash recovery |
 | P4 | `inBatches` | resumable large backfills |
@@ -83,7 +87,7 @@ replica set locally and in CI, reports coverage, generates API docs and publishe
 
 | Path | Content |
 |---|---|
-| `settings.gradle.kts` | `rootProject.name = "godwit"`, `include("godwit-core", "godwit-test", "docs-snippets")` |
+| `settings.gradle.kts` | `rootProject.name = "godwit"`, `include("godwit-core", "godwit-test")`. `docs-snippets/` stays a build of its own (below) |
 | `gradle.properties` | every version, in `key = value` form so the Makefile can include it (below) |
 | `gradle/wrapper/*`, `gradlew`, `gradlew.bat` | Gradle 9.7.1, `validateDistributionUrl=true` |
 | `build.gradle.kts` | root: `base`, `org.jetbrains.dokka`, `com.gradleup.nmcp.aggregation`; `group = "works.resolute"`; Dokka output to `docs/dokka`; `dokka(project(...))` and `nmcpAggregation(project(...))` for both published modules; Central Portal credentials from `SONATYPE_PUBLISH_USERNAME` and `SONATYPE_PUBLISH_PASSWORD`, `publishingType = "AUTOMATIC"` |
@@ -93,21 +97,27 @@ replica set locally and in CI, reports coverage, generates API docs and publishe
 | `buildSrc/src/main/kotlin/publish-conventions.gradle.kts` | `maven-publish`, `signing`, `com.gradleup.nmcp`; publication `mavenJava`; POM with name, the module's required `description`, Apache-2.0 license, SCM `resoluteworks/godwit`, developer; GPG signing on the maintainer's machine |
 | `godwit-core/build.gradle.kts` | the three convention plugins; `description`; `api("org.mongodb:mongodb-driver-kotlin-sync:$mongoDriverVersion")`, `implementation("org.slf4j:slf4j-api:$slf4jVersion")`; the `verifyRuntimeDependencies` task (below) wired into `check` |
 | `godwit-test/build.gradle.kts` | the three convention plugins; `description`; `api(project(":godwit-core"))`, `implementation("org.testcontainers:testcontainers-mongodb:$testContainersVersion")` |
-| `docs-snippets/build.gradle.kts` | not published; `implementation(project(":godwit-test"))`, Kotest, MockK; compiles the example shop and the docs snippets (filled in P1) |
 | `godwit-core/src/test/kotlin/godwit/core/fixtures/TestMongo.kt` | one replica-set container per test JVM (`org.testcontainers.mongodb.MongoDBContainer`, image from `mongoImage`, `--setParameter enableTestCommands=1` for fail points), a client per call, a UUID database per call |
 | `godwit-core/src/test/kotlin/godwit/core/fixtures/ReplicaSetSmokeTest.kt` | runs `hello` against the fixture and asserts a replica set name |
 | `scripts/coverage-gate.py`, `coverage-exceptions.txt` | the branch-coverage gate |
 | `Makefile` | below |
-| `.github/workflows/ci.yml` | below |
+| `.github/workflows/ci.yml` | below; it runs `scripts/check-docs.sh` |
 | `.github/workflows/publish-docs.yml` | on a `v*` tag: `./gradlew :dokkaGenerate`, then deploy `docs/` to GitHub Pages |
 | `LICENSE` | the Apache License 2.0 text |
 | `.editorconfig` | `root = true`, UTF-8, final newline, trimmed trailing whitespace, `max_line_length = 120`, 4-space indent for `*.kt` and `*.kts`, ktlint `intellij_idea` style without trailing commas |
 | `.sdkmanrc` | `java=21.0.2-tem` |
 
+The documentation build exists before P0 and P0 leaves it as it is: `docs-snippets/` is a standalone Gradle build (its
+own `settings.gradle.kts` and wrapper) that compiles the example shop and every docs snippet against the API stubs in
+`docs-snippets/api-stubs/`, with the snippets that must not compile in `docs-snippets/neg/`. The checks are in
+`scripts/`: `check-docs.sh` runs the compile, `neg-check.sh`, `check-snippets.sh`, `check-links.sh` and
+`check-content.sh` in that order and stops at the first failure
+([docs-snippets/README.md](../../docs-snippets/README.md)). P0 wires `scripts/check-docs.sh` into the Makefile and CI.
+
 `gradle.properties`:
 
 ```properties
-godwitVersion = 1.0.0
+godwitVersion = 0.1.0
 
 kotlinVersion = 2.4.20
 
@@ -144,10 +154,7 @@ test:
 	./gradlew coverallsJacoco
 
 check-docs:
-	scripts/check-snippets.sh .
-	scripts/neg-check.sh
-	scripts/check-links.sh .
-	scripts/check-content.sh .
+	scripts/check-docs.sh
 
 publish-local:
 	./gradlew publishToMavenLocal
@@ -183,13 +190,15 @@ jobs:
       - run: ./gradlew test
       - run: ./gradlew atlasTest
       - run: python3 scripts/coverage-gate.py
-      - run: make check-docs
+      - run: ./gradlew -p docs-snippets compileKotlin
+      - run: scripts/check-docs.sh
       - run: ./gradlew coverallsJacoco
         env:
           COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
 ```
 
-`ubuntu-latest` has Docker, which Testcontainers needs.
+`ubuntu-latest` has Docker, which Testcontainers needs. `check-docs.sh` builds offline, so the step before it resolves
+the `docs-snippets` build's dependencies into the Gradle cache.
 
 **Behaviours.**
 
@@ -215,30 +224,32 @@ gh run watch --exit-status
 **Measurable outcome.** CI is green on the P0 pull request, with the smoke test running against a real replica set.
 Traces: the smoke test logs `test replica set ready setName=docker-rs startupMs=<n>`; `verifyRuntimeDependencies`
 prints `runtime dependencies: org.mongodb:mongodb-driver-kotlin-sync:5.7.0, org.slf4j:slf4j-api:2.0.17`;
-`~/.m2/repository/works/resolute/godwit-core/1.0.0/godwit-core-1.0.0.pom` exists and lists exactly those two runtime
-dependencies.
+`~/.m2/repository/works/resolute/godwit-core/0.1.0/godwit-core-0.1.0.pom` exists and lists exactly those two runtime
+dependencies; the CI log's docs step ends with `check-docs: all checks passed`.
 
 ## P1. Declarations, validation and the planner
 
 **Goal.** The complete public API of both modules compiles, the docs compile against it, and every decision about what
 to run is a pure function, tested exhaustively before any I/O exists.
 
-**Files.**
+**Files.** The public signatures and their KDoc start as the files in `docs-snippets/api-stubs/`, which the docs
+already compile against: P1 moves each file into the real module, keeps every signature, and replaces each `TODO()`
+body with the implementation or with a `NotImplementedError` naming the phase that implements it.
 
 | Path | Content |
 |---|---|
 | `godwit-core/src/main/kotlin/godwit/core/declaration.kt` | `MigrationKind`, `StepKind`, `Migration`, `migration`, `everyStart`, `repeatable`, `MigrationDraft`, `OutsideTransactionMigration`, and the internal step holders the runner reads |
 | `.../scopes.kt`, `ddl.kt` | the scopes and DDL helpers' signatures; bodies that need I/O throw `NotImplementedError("P3")` |
 | `.../validation.kt` | `validateMigrations` |
-| `.../Godwit.kt`, `GodwitConfig.kt`, `reports.kt`, `exceptions.kt` | the public types as documented; `Godwit`'s I/O methods throw `NotImplementedError` naming their phase |
+| `.../Godwit.kt`, `GodwitConfig.kt`, `reports.kt`, `exceptions.kt` | the public types of the stubs; `Godwit`'s I/O methods throw `NotImplementedError` naming their phase |
 | `.../internal/Plan.kt` | the plan: due migrations in run order, superseded records to write, conflicts, unknown applied ids, `needsTransactions`, `untracked` |
 | `.../internal/HistoryRecord.kt` | a history document as plain Kotlin data, the planner's input |
-| `.../internal/Planner.kt` | `plan(migrations, history, target, config): Plan` |
+| `.../internal/Planner.kt` | `plan(migrations, history, target, config, adopting): Plan` |
 | `godwit-test/src/main/kotlin/godwit/test/*.kt` | `testGodwit`, `TestGodwit`, the runner-path helpers, `SessionEscapeDetector`, `SessionEscapeError`: signatures, bodies `NotImplementedError("P7")` |
 | `godwit-core/api/godwit-core.api`, `godwit-test/api/godwit-test.api` | the ABI dumps (`./gradlew apiDump`) |
-| `docs-snippets/src/main/kotlin/com/example/**` | the example shop, the file store library and one package per doc (`com.example.shop.docs.<doc_slug>`) |
-| `neg/*.kt`, `scripts/neg-check.sh` | the snippets that must not compile, each with `// expect: <compiler message>` on its first line, and the script that compiles each one alone |
-| `scripts/check-snippets.sh`, `scripts/check-links.sh`, `scripts/check-content.sh` | snippet containment, relative links and anchors, content rules |
+| `docs-snippets/settings.gradle.kts` | `includeBuild("..")` in place of the two `api-stubs` projects, so the docs build compiles against the root build's `godwit-core` and `godwit-test` |
+| `docs-snippets/build.gradle.kts`, `docs-snippets/neg-check/build.gradle.kts` | `implementation("works.resolute:godwit-test")` in place of `project(":godwit-test")`; Gradle substitutes the included build's module |
+| `docs-snippets/api-stubs/`, `docs-snippets/API.md`, `scripts/gen-api.sh` | deleted: the real modules carry the signatures and KDoc, the ABI dumps and Dokka list the public API, and `docs-snippets/README.md` and `DOMAIN.md` point there |
 
 **Behaviours.**
 
@@ -256,10 +267,15 @@ to run is a pure function, tested exhaustively before any I/O exists.
     migration; repeatable and every-start documents and unknown ids never count; a recorded baseline is exempt),
     partial supersede (evaluated only while the baseline has no `APPLIED` document), unknown applied under
     `UnknownApplied.FAIL`, an adoption gap through the out-of-order policy;
+  - `adopting` (an input: `adoptApplied` is set and every history document is `ADOPTED`, or there is none): the
+    out-of-order and partial-supersede conflicts are left out, so the plan made before the lock, and `status()`, never
+    report what the hook may still fill; the plan made under the lock after the hook passes `false` and checks every
+    conflict;
   - unknown applied ids sorted by id; ids in any recorded superseding migration's stored `supersedes` list count as
     known; `FAILED` or `RUNNING` history for an undeclared id is neither reported nor run;
   - superseded records: all replaced ids `APPLIED` means record, none means run, some means conflict;
-  - `needsTransactions` when any due migration has a transactional step; `untracked` when history is empty.
+  - `needsTransactions` when any due migration has a transactional step; `untracked` when history is empty and
+    `adopting` is false (`status()` with a hook configured never reports it).
   - the same plan backs `status()`: every-start migrations are never pending.
 
 **Tests.**
@@ -268,7 +284,7 @@ to run is a pure function, tested exhaustively before any I/O exists.
 |---|---|
 | `DeclarationTest` | every factory and step combination; `steps`, `kind`, `supersedes`; `toString` is the id |
 | `ValidationTest` | one failing list per rule, the exact problem text, all problems in one exception, a valid list passes; `Target` errors |
-| `PlannerTest` | table-driven over kind x history state x origin x policy x target: due, order, conflicts, unknown ids, supersede outcomes, `needsTransactions`, `untracked`, status pending |
+| `PlannerTest` | table-driven over kind x history state x origin x policy x target x `adopting`: due, order, conflicts, unknown ids, supersede outcomes, `needsTransactions`, `untracked`, status pending; with `adopting`, a gap and a partial supersede are not conflicts and their ids are due |
 | `PlannerPropertyTest` | 10,000 generated lists and histories (kotest-property): an `APPLIED` once-only migration is never due; due order follows list order; a repeatable or every-start migration never runs before a due once-only one; no target runs a repeatable; an `APPLIED` repeatable or every-start document never makes a once-only migration out of order |
 | `neg-check.sh` | every "This does not compile:" block fails with its expected message; one control snippet compiles |
 
@@ -279,14 +295,14 @@ to run is a pure function, tested exhaustively before any I/O exists.
 ./gradlew apiCheck
 ./gradlew :godwit-core:test
 python3 scripts/coverage-gate.py
-./gradlew :docs-snippets:compileKotlin
-scripts/check-snippets.sh .
-scripts/neg-check.sh
+./gradlew -p docs-snippets compileKotlin
+scripts/check-docs.sh
 ```
 
 **Measurable outcome.** Branch coverage of `validation.kt` and `godwit.core.internal.Planner*` is 100 % (the gate's
-output lists each class with `branches=<covered>/<total>`). `check-snippets.sh` reports every kotlin block found;
-`neg-check.sh` reports every expectation held. `PlannerPropertyTest` logs `planner invariants held lists=10000`.
+output lists each class with `branches=<covered>/<total>`). `scripts/check-docs.sh`, run against the real modules
+with `docs-snippets/api-stubs/` gone, reports every kotlin block found and every neg expectation held, and ends with
+`check-docs: all checks passed`. `PlannerPropertyTest` logs `planner invariants held lists=10000`.
 
 ## P2. History store and lease lock
 
@@ -295,7 +311,7 @@ under concurrency, crashes and lost renewals.
 
 **Files.** `godwit-core/src/main/kotlin/godwit/core/internal/Bookkeeping.kt` (both collections on the default codec
 registry, majority read and write concern, primary reads), `HistoryStore.kt`, `MongoLock.kt`, `Heartbeat.kt`,
-`Log.kt` (the event catalogue as one function per event, slf4j fluent API).
+`Log.kt` (the event catalogue as one function per event, slf4j fluent API, including the three lock events).
 
 **Behaviours.**
 
@@ -309,18 +325,26 @@ registry, majority read and write concern, primary reads), `HistoryStore.kt`, `M
     0 matched means the lock was lost.
   - `FAILED` with `lastError` (`type`, `message`, stack capped at 8 KB, `step`, `at`), outside any transaction, fenced
     on `{_id, owner, state: RUNNING}`; it reports whether it matched.
-  - `ADOPTED`, `SUPERSEDED` and `MARKED` records: conditional upsert on `state != APPLIED`; `steps: []`, `attempts: 0`,
-    no `counts`. The `ADOPTED` records of one adoption in one transaction; on a standalone server one write per id,
-    last-listed first.
+  - `ADOPTED` records: an upsert on `{_id}` whose fields are all in `$setOnInsert` (`steps: []`, `attempts: 0`, no
+    `counts`), so an existing document of any state is left unchanged. The records of one adoption call, only for ids
+    the history read under the lock lacks, in one `withTransaction` with `checkLock()` before the commit; on a
+    standalone server one write per id, `checkLock()` before each, last-listed first (the reverse of the once-only
+    order, each migration preceded by the ids its `supersedes` list names, in that list's order).
+  - `SUPERSEDED` and `MARKED` records: conditional upsert on `state != APPLIED`; `steps: []`, `attempts: 0`, no
+    `counts`.
 - Lock:
   - acquire: `findOneAndUpdate` with a pipeline on `$$NOW`, upsert, owner token per acquisition; 11000 means held.
   - wait: poll every 250 ms to 5 s with jitter; log `Waiting for migration lock` with the holder every 10 s; throw
     `LockTimeoutException` at `waitTimeout`; `Duration.ZERO` fails at the first refusal.
   - heartbeat: a daemon thread renews every `heartbeat`; it checks the local deadline before each renewal; a renewal
-    that matches 0 documents, or a deadline that passes, marks the lock lost for good.
+    that throws logs `Lock renewal failed` (`runId`, `holder`, `error`) and is retried at the next tick; a renewal
+    that matches 0 documents, or a deadline that passes, marks the lock lost for good and logs `Lost migration lock`
+    (`runId`, `holder`, `reason` `NOT_OWNER` or `DEADLINE_PASSED`) once per run, from the heartbeat thread or from
+    `checkLock()`, whichever sees it first.
   - `checkLock()`: no I/O; throws `LockLostException` once the lock is lost or the local deadline
     (`lease - safetyMargin` after the last renewal was sent, on the monotonic clock) has passed.
-  - release: fenced on the owner token, sets `expiresAt` and `releasedAt` to `$$NOW`.
+  - release: fenced on the owner token, sets `expiresAt` and `releasedAt` to `$$NOW`; a release that throws logs `Lock
+    release failed` (`runId`, `holder`, `error`) and is not retried.
   - every lock operation has a 5 s client-side timeout.
 
 **Tests.** All integration tests use short timings (`LockConfig(lease = 3.seconds, heartbeat = 1.seconds,
@@ -328,12 +352,12 @@ safetyMargin = 1.seconds)`).
 
 | Spec | Covers |
 |---|---|
-| `HistoryStoreTest` | each write's filter, update and fence; the 11000 skip; the repeatable reset of `attempts`; `lastError` cap; a stale owner's `APPLIED` and `FAILED` writes match 0; a `FAILED` write on an `APPLIED` document of the same owner matches 0; the adoption records commit together or not at all |
-| `MongoLockTest` | first-ever concurrent acquire (the loser sees 11000 and polls); re-acquire by the same owner; acquire after expiry; release by a stale owner changes nothing; `waitTimeout` and `Duration.ZERO`; the lock document deleted by hand (the next renewal marks the lock lost, the next acquire recreates it) |
-| `HeartbeatTest` | renewal keeps the lock past three leases; a renewal blocked by a fail point (`failCommand` with `blockConnection`, scoped to the holder's `appName`) makes `checkLock()` throw before another process can acquire |
+| `HistoryStoreTest` | each write's filter, update and fence; the 11000 skip; the repeatable reset of `attempts`; `lastError` cap; a stale owner's `APPLIED` and `FAILED` writes match 0; a `FAILED` write on an `APPLIED` document of the same owner matches 0; the adoption records commit together or not at all; recording adopted ids twice leaves the first records unchanged; an adoption transaction over an id that another run has just adopted commits without error and changes nothing; an adoption write over a `RUNNING` document leaves it `RUNNING`; a lost lock before the adoption commit records nothing and throws `LockLostException` |
+| `MongoLockTest` | first-ever concurrent acquire (the loser sees 11000 and polls); re-acquire by the same owner; acquire after expiry; release by a stale owner changes nothing; a release that throws (a `failCommand` fail point) logs `Lock release failed` and the lease ends on its own; `waitTimeout` and `Duration.ZERO`; the lock document deleted by hand (the next renewal marks the lock lost and logs `Lost migration lock reason=NOT_OWNER`, the next acquire recreates it) |
+| `HeartbeatTest` | renewal keeps the lock past three leases; a renewal that fails once logs `Lock renewal failed` and the next one keeps the lock; a renewal blocked by a fail point (`failCommand` with `blockConnection`, scoped to the holder's `appName`) makes `checkLock()` throw before another process can acquire, with exactly one `Lost migration lock reason=DEADLINE_PASSED` |
 | `LockContentionTest` | 8 threads, each with its own client and owner, acquire and release 50 times; a shared counter proves at most one holder at any moment |
 | `LockConfigTest` | each `require` in `LockConfig` |
-| `LogCatalogueTest` | the wait and acquire events carry their documented keys |
+| `LogCatalogueTest` | the wait, acquire, renewal-failed, lost and release-failed events carry their documented keys |
 
 **Gate.**
 
@@ -346,7 +370,7 @@ python3 scripts/coverage-gate.py
 **Measurable outcome.** `LockContentionTest` observes a maximum of 1 concurrent holder over 400 acquisitions. After a
 holder's process is killed, another acquires within `lease` plus one poll interval. Traces: `Waiting for migration
 lock holder=... holderRunId=... expiresAt=... waitedMs=...` every 10 s while waiting, then `Acquired migration lock
-runId=... lockWaitMs=<n>`.
+runId=... lockWaitMs=<n>`; `Lost migration lock runId=... holder=... reason=DEADLINE_PASSED` once in `HeartbeatTest`.
 
 ## P3. Runner for once-only migrations
 
@@ -380,7 +404,9 @@ driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (sco
   whose reply failed), anything else as a lost lock; `MigrationFailedException` carries the step, the report so far,
   the cause and the guidance line of [architecture](../architecture.md#error-guidance); a failed `FAILED` write leaves
   the document `RUNNING` and is attached as a suppressed exception; a lost lock writes nothing more and throws
-  `LockLostException`; the run stops at the first failure.
+  `LockLostException`, except that a step error that coincides with the lock loss is still written with the fenced
+  `FAILED` write (it matches only while no other run has taken the document over) and becomes the
+  `LockLostException`'s cause; the run stops at the first failure.
 - DDL helpers: `ensureCollection` (48 counts as existing), `dropIndexIfExists` (drops only what `listIndexes` shows,
   so it returns false for a missing index on every server version; 27 from a concurrent drop counts as gone),
   `ensureSearchIndex` (create unless a search index with the name exists, a concurrent create of the name counting as
@@ -396,10 +422,10 @@ driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (sco
 |---|---|
 | `RunnerTest` | outside-only, transactional-only and two-step migrations; the prepared value reaches the transaction, and the same instance reaches every driver retry (a `TransientTransactionError` fail point with a prepared value the body would drain or a one-shot `Sequence`); counters from both steps add up; report fields; stop at the first failure; `status`, `requireUpToDate`, `history` |
 | `FastPathTest` | nothing due: exactly one command (`find` on `godwit-history`) and no command on `godwit-lock`, observed by a command listener; `lockWait` null |
-| `CrashWindowTest` | a child JVM (`CrashMain`) runs a scenario and is killed with `destroyForcibly()` at a point marked by a command listener in the child: after the marker, mid outside step, after the outside step, inside the transaction, after the commit and before the release, and while adoption records its ids. The parent then runs `migrate` and asserts the resume, the `attempts` count, that every transactional effect (an `$inc` probe) is 1, and that an interrupted adoption recorded nothing and is adopted again |
+| `CrashWindowTest` | a child JVM (`CrashMain`) runs a scenario and is killed with `destroyForcibly()` at a point marked by a command listener in the child: after the marker, mid outside step, after the outside step, inside the transaction, and after the commit and before the release. The parent then runs `migrate` and asserts the resume, the `attempts` count, and that every transactional effect (an `$inc` probe) is 1 |
 | `TransactionRetryTest` | `failCommand` fail points: a `TransientTransactionError` re-runs the body with fresh counters and `attempt` 2, after a pause; an `UnknownTransactionCommitResult` retries only the commit; a transient error on commit logs `error=commit`; a body that conflicts for 5 s logs `Retrying transaction` at most once per 10 s and counts every retry; a commit that applies and then times out on the client (`timeoutMS`, a blocked majority acknowledgement) ends `APPLIED`, not `FAILED`, with the `$inc` probe at 1, also for an outside-only `APPLIED` record; `txRetries` in the report and log |
 | `ErrorGuidanceTest` | 251 and 290 after a long attempt (the 60 s threshold is an internal constructor parameter set low in the test), 388, 263, an index build on an existing collection in a transaction, a session from another client; each message carries its guidance, and an unknown cause carries none |
-| `LockLossTest` | a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` |
+| `LockLossTest` | a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` without a cause; a step that throws its own error once the deadline has passed: `LockLostException` whose cause is that error, and the document `FAILED` with it as `lastError`; the same after another run's marker took the document: the cause is kept and the `FAILED` write matches nothing; an `inTransaction` call that fails with a network error once the deadline has passed (a `failCommand` fail point with `closeConnection`, which the driver labels `TransientTransactionError` inside a transaction, as it does a server selection timeout): the driver runs the body again, its first `checkLock()` throws, history is unchanged, `LockLostException` without a cause; the same call on a client with `timeoutMS` failing with `MongoOperationTimeoutException`, which `withTransaction` does not retry: `LockLostException` whose cause is the timeout |
 | `TopologyTest` | a standalone container: `TransactionsUnsupportedException` listing the due transactional migrations, before the lock; an outside-only list runs; a transactional repeatable that becomes due under the lock still throws `TransactionsUnsupportedException` |
 | `DdlHelpersTest` | each helper twice in a row; concurrent `ensureCollection` from two threads; `dropIndexIfExists` of a missing index returns false, also on a MongoDB 8.3 or later image |
 | `SearchIndexTest` (tag `Atlas`) | create, exists, wait until queryable, wait for an existing index that is still building, `SearchIndexNotReadyException`, `checkLock()` between polls |
@@ -508,11 +534,17 @@ safely, and offers the audited escape hatch.
 
 **Behaviours.**
 
-- Adoption, per [adopting an existing database](../adopting-an-existing-database.md): the hook runs under the lock,
-  only while history is empty; `checkLock()` after it returns; declared once-only ids and ids named in a `supersedes`
-  list are recorded `ADOPTED` in one transaction (one write per id, last-listed first, on a standalone server) before
-  the plan is checked; other ids are logged as ignored; a gap follows the out-of-order policy; an exception from the
-  hook propagates, the lock is released and nothing is recorded.
+- Adoption, per [adopting an existing database](../adopting-an-existing-database.md) and
+  [DD-14](../design-decisions.md#dd-14-adoption-through-an-application-supplied-hook): the hook runs under the lock on
+  every start that takes it while every history document is `ADOPTED` (or there is none), and not while a document of
+  another origin exists (deleting every such document reopens adoption); `checkLock()` after it returns; the declared
+  once-only ids and ids named in a `supersedes` list that history does not hold yet are written `ADOPTED` with
+  insert-only upserts, in one `withTransaction` with `checkLock()` before the commit (one write per id, `checkLock()`
+  before each, last-listed first with each migration preceded by the ids its `supersedes` list names, on a standalone
+  server), before the plan is checked; ids recorded earlier are kept, never removed; other ids are
+  logged as ignored; `Adopted applied migrations` on every call, `adopted` listing the ids that call recorded; the
+  out-of-order and partial-supersede checks wait for the plan made after the hook; a gap left after the hook follows
+  the out-of-order policy; an exception from the hook propagates, the lock is released and nothing is recorded.
 - The untracked guard, under the lock: collections other than godwit's and `system.*`, no history, nothing adopted:
   `UntrackedDatabaseException` under `REFUSE`, everything runs under `RUN_ALL`.
 - Squashes, per [squashing migrations](../squashing-migrations.md): `Recorded superseded migration` with the stored
@@ -520,20 +552,25 @@ safely, and offers the audited escape hatch.
 - Unknown applied ids: WARN and `report.unknownApplied`, or `PlanConflictException` under `FAIL`, checked before the
   fast path.
 - `markApplied(id, reason)`: waits for the lock; `RUNNING`, `FAILED` or missing becomes `APPLIED` with origin `MARKED`
-  (a missing document is recorded once-only); `APPLIED` is unchanged; a `REPEATABLE` or `EVERY_START` document and a
-  blank reason throw `IllegalArgumentException` without writing; `Marked migration applied` at WARN.
+  (a missing document is recorded once-only); an `APPLIED` once-only document is unchanged; a `REPEATABLE` or
+  `EVERY_START` document in any state, `APPLIED` included, and a blank reason throw `IllegalArgumentException` without
+  writing; with `adoptApplied` set and history empty or holding
+  only `ADOPTED` documents, `IllegalStateException` without writing, checked under the lock on the same history read
+  ([DD-14](../design-decisions.md#dd-14-adoption-through-an-application-supplied-hook)); `Marked migration applied` at
+  WARN.
 - `Target.Before` and `Target.Through` stop the run; `report.pending` lists what they left due.
 
 **Tests.**
 
 | Spec | Covers |
 |---|---|
-| `AdoptionTest` | full prefix; empty result (guard); undeclared ids ignored; `supersedes` ids imported; a gap under `FAIL` and `RUN`; the hook throws; history not empty (hook not called); `system.*` collections ignored; standalone server with a transactional migration due; a write of the adoption transaction fails (nothing recorded, the hook runs again); on a standalone server, records written last-listed first |
-| `AdoptionConcurrencyTest` | 4 processes start on the same unadopted database: the hook runs once |
+| `AdoptionTest` | full prefix; empty result (guard); undeclared ids ignored; `supersedes` ids imported; a gap under `FAIL` and `RUN`; after a refused gap the next start calls the hook again, records only the ids the corrected record adds and removes none; the hook throws; `system.*` collections ignored; standalone server with a transactional migration due; an error that is not transient in the adoption transaction (nothing recorded, the exception propagates, the next start calls the hook again); a transient one (a `failCommand` fail point with the `TransientTransactionError` label on its first write) is retried in the same call and every id is recorded; on a standalone server, records written last-listed first, each migration preceded by the ids its `supersedes` list names; an interrupted standalone adoption (a `failCommand` fail point on the third write of an outside-only list) completes on the next start under `OutOfOrder.FAIL` and under `OutOfOrder.RUN`: no `PlanConflictException`, no migration runs out of order, every id `ADOPTED`; the same partial adoption started without the hook: `PlanConflictException` under `FAIL`; an interrupted standalone adoption of ids a `supersedes` list names: the baseline counts as due before the lock, so the next start reaches the hook and completes the adoption, and a start without the hook refuses the partial supersede under both policies; `status()` on a partially adopted database lists the missing ids as pending and reports no problem; the hook (a counting fake) is not called while history holds a `RAN`, a `SUPERSEDED` or a `MARKED` document, and is called again once every such document is deleted; the first once-only id marked before the first start from a `Godwit` built without the hook: the hook is not called and the next start runs the migrations listed after it; a later id marked that way: `PlanConflictException` under `FAIL`; a start with nothing due does not call it |
+| `AdoptionConcurrencyTest` | 4 processes start on the same unadopted database whose list has a migration left to run: the hook runs once; with a list that adoption covers entirely, every waiting process calls it again and records nothing; on a standalone container whose history holds a partial adoption, a process that reads it before the lock waits for the holder and ends without `PlanConflictException` |
+| `AdoptionCrashTest` | `CrashMain` (P3) killed while adoption records its ids: on a replica set the next start finds all of them recorded or none, calls the hook and records what is missing; on a standalone server it finds a partial adoption and completes it, as in `AdoptionTest` |
 | `UntrackedGuardTest` | `REFUSE` names the collections; `RUN_ALL` runs everything; an empty database runs everything |
 | `SupersedesTest` | all applied (recorded, not run), none (runs), some (conflict); an `APPLIED` baseline is not evaluated again (a database the baseline built that ran three of the old six under an older release); the stored list keeps old ids known after they leave the code; a recorded baseline is exempt from the out-of-order policy |
 | `UnknownAppliedTest` | WARN with the sorted ids in the report and the log; `FAIL` on a start with nothing due |
-| `MarkAppliedTest` | each starting state; a repeatable and an every-start document refused; blank reason; waits for a held lock |
+| `MarkAppliedTest` | each starting state; a repeatable and an every-start document refused, each when `FAILED` and when `APPLIED` (an `APPLIED` repeatable at its current revision included), with the document unchanged; blank reason; waits for a held lock; with `adoptApplied` set, refused with `IllegalStateException` and its exact message on an empty history, and on a history that holds only `ADOPTED` documents (the id's own `ADOPTED` document included); succeeds once a `RAN` document exists; succeeds from a `Godwit` built with `config.copy(adoptApplied = null)` on an empty history and on one with only `ADOPTED` documents, with a custom `historyCollection` and `lockCollection` that the mark writes to and locks; on every refusal the history collection is unchanged (no document written or modified), no `Marked migration applied` line is logged and the lock is released |
 | `TargetTest` | `Before`, `Through`, `pending` in the report; no repeatable or every-start migration runs |
 
 **Gate.**
@@ -544,9 +581,18 @@ safely, and offers the audited escape hatch.
 python3 scripts/coverage-gate.py
 ```
 
-**Measurable outcome.** Four concurrent first starts on an unadopted database call the hook once and log one
-`Adopted applied migrations adopted=[...] ignored=[...]` line. Traces: `Recorded superseded migration id=...
-supersedes=[...]`, `Unknown applied migrations ids=[...]`, `Marked migration applied id=... reason=... holder=...`.
+**Measurable outcome.** Four concurrent first starts on an unadopted database with a migration left to run call the hook
+once and log one `Adopted applied migrations adopted=[...] ignored=[...]` line. An interrupted standalone adoption ends
+with every id `ADOPTED` and no `PlanConflictException`, under both out-of-order policies, also for a process that read
+the partial adoption before the lock; started without the hook, the same partial adoption is refused under `FAIL`, and
+a partial supersede under both policies. The hook is not called on any start while a `RAN`, `SUPERSEDED` or `MARKED`
+document exists, and is called again once they are deleted. `status()` on a partial adoption lists the missing ids as
+pending with no problem. `markApplied` on a `Godwit` with `adoptApplied` throws `IllegalStateException` and writes
+nothing while history is empty or holds only `ADOPTED` documents; marked from a `Godwit` built without the hook before
+the first start, the first id ends adoption and the next start runs the migrations after it, as the docs warn.
+Traces: `Recorded superseded
+migration id=... supersedes=[...]`, `Unknown applied migrations ids=[...]`, `Marked migration applied id=... reason=...
+holder=...`.
 
 ## P7. The godwit-test kit
 
@@ -554,7 +600,8 @@ supersedes=[...]`, `Unknown applied migrations ids=[...]`, `Marked migration app
 `session` fails the test.
 
 **Files.** `godwit-test/src/main/kotlin/godwit/test/testGodwit.kt`, `runnerPath.kt`, `SessionEscapeDetector.kt`,
-`internal/SharedContainers.kt`; tests under `godwit-test/src/test/kotlin/godwit/test/`.
+`internal/SharedContainers.kt`; tests under `godwit-test/src/test/kotlin/godwit/test/`; in
+`docs-snippets/build.gradle.kts`, a `test` task that runs the Kotest specs its main source set compiles.
 
 **Behaviours.** Per [testing](../testing.md):
 
@@ -586,7 +633,7 @@ supersedes=[...]`, `Unknown applied migrations ids=[...]`, `Marked migration app
 ./gradlew lintKotlin
 ./gradlew apiCheck
 ./gradlew :godwit-test:test
-./gradlew :docs-snippets:test
+./gradlew -p docs-snippets test
 python3 scripts/coverage-gate.py
 ```
 
@@ -608,7 +655,10 @@ contains the README's example and test).
 
 - Every log line, history document, exception message and problem text quoted in the docs matches what the
   implementation produces: `DocsFidelityTest` runs the scenario behind each quoted output and compares the text,
-  ignoring run ids, times and durations.
+  ignoring run ids, times and durations. Its scenarios include the lock-loss timelines of
+  [locking](../locking.md#losing-the-lock-mid-run) and [failure and recovery](../failure-and-recovery.md#lock-lost),
+  with the three lock events (`Lock renewal failed`, `Lost migration lock`, `Lock release failed`) and the driver's
+  error text they quote; where the driver's text differs, every occurrence in the docs changes together.
 - A final documentation pass runs once P1 to P7 have merged and the code has settled, before the release:
   - Every page of `README.md` and `docs/**` is re-read against the implementation.
   - Every design decision that changed during P1 to P7 is updated in [design decisions](../design-decisions.md) and in each doc that explains it.
@@ -628,18 +678,19 @@ the artifacts from Maven Local, contains the README's example and test, and runs
 ./gradlew test
 ./gradlew atlasTest
 python3 scripts/coverage-gate.py
-make check-docs
+scripts/check-docs.sh
 ! grep -rn -e 'TODO(' -e 'NotImplementedError' godwit-core/src/main godwit-test/src/main
 ./gradlew :dokkaGenerate
 make publish-local
 ./gradlew -p consumer-smoke test
 make release
-curl -sf https://repo1.maven.org/maven2/works/resolute/godwit-core/1.0.0/godwit-core-1.0.0.pom
+curl -sf https://repo1.maven.org/maven2/works/resolute/godwit-core/0.1.0/godwit-core-0.1.0.pom
 ```
 
 **Measurable outcome.** The final `curl` exits 0, and the published POM lists exactly two runtime dependencies. The
-consumer smoke project's README test passes against the published coordinates. Traces: `make check-docs` reports every
-kotlin block found, every neg expectation held and every link resolved; the GitHub Pages site serves the Dokka output.
+consumer smoke project's README test passes against the published coordinates. Traces: `scripts/check-docs.sh` reports
+every kotlin block found, every neg expectation held and every link resolved; the GitHub Pages site serves the Dokka
+output.
 
 ## Risk register
 
@@ -654,13 +705,14 @@ kotlin block found, every neg expectation held and every link resolved; the GitH
 | 7 | Driver 5.7.0 retries a transaction body without backoff (backoff exists from 5.12) | Write conflicts with heavy application traffic, or with a dead holder's open transaction after a takeover, retry in a tight loop | godwit's body wrapper pauses between attempts and rate-limits the `Retrying transaction` WARN (P3); `transactionRetries` makes retries visible; batch sizes are the lever | `txRetries` in the `Applied migration` line |
 | 8 | CI tests one server release (`mongoImage`) while the docs state MongoDB 4.4 or later | An older server behaves differently | before the release, run `./gradlew test -PmongoImage=mongo:4.4` once; the README states the lowest version that passes | that run's exit code |
 | 9 | The Atlas local image is large and slow to start | Slow or flaky CI | only `Atlas`-tagged specs use it, in their own `atlasTest` task and CI step | `atlasTest` duration |
-| 10 | Clock skew on the primary | A lease ends early or late | the lease uses `$$NOW` on one server; the safety margin absorbs small skew; the docs require NTP | `Lost migration lock` (if the logging decision above is taken) |
+| 10 | Clock skew on the primary | A lease ends early or late | the lease uses `$$NOW` on one server; the safety margin absorbs small skew; the docs require NTP | `Lost migration lock ... reason=DEADLINE_PASSED` |
 | 11 | A migration value that is never listed compiles and never runs | A change silently missing from a release | the coverage convention test in [testing](../testing.md#every-migration-has-a-test) | that test fails when the list and the tests disagree |
 | 12 | Topology is checked before adoption | A standalone server with transactional migrations refuses even when adoption would cover them | documented as an edge case in [adopting an existing database](../adopting-an-existing-database.md#edge-cases) | `TransactionsUnsupportedException` on a first start |
 | 13 | Revisions are compared for equality, not order | An older release applies its own revision again during a rollback | documented in [repeatable migrations](../repeatable-migrations.md#edge-cases) | `Applied migration ... kind=REPEATABLE` from the older release |
-| 14 | A deleted repeatable or every-start migration keeps an `APPLIED` document | An unknown-applied warning on every start | the documented manual deletion; see the decision table above | `Unknown applied migrations ids=[...]` |
-| 15 | Kotlin metadata compatibility for consumers on older compilers | A consumer cannot compile against godwit | the decision above; the consumer smoke project compiles with the Kotlin version the README states | the smoke project's build |
+| 14 | A deleted repeatable or every-start migration keeps an `APPLIED` document | An unknown-applied warning on every start | the documented manual deletion; see [the settled decisions](#decisions-settled-before-p0) | `Unknown applied migrations ids=[...]` |
+| 15 | Kotlin metadata compatibility for consumers on older compilers | A consumer cannot compile against godwit | [DD-26](../design-decisions.md#dd-26-jvm-21-and-kotlin-24); the consumer smoke project compiles with the Kotlin version the README states | the smoke project's build |
 | 16 | Publishing depends on the maintainer's GPG key and Central Portal credentials in `.env` | A release blocked or half-published | `make release` runs `publish-local` (which signs) before `publish`; nmcp publishes the aggregation in one deployment | `curl` on the published POM |
+| 17 | The adoption hook runs again on every start until a migration runs | A slow or side-effecting hook slows or disturbs those starts | documented as a pure read ([adopting an existing database](../adopting-an-existing-database.md#leaving-the-hook-in-place)); `AdoptionTest` pins when it is and is not called | `Adopted applied migrations` on more than one start |
 
 ## See also
 

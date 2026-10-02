@@ -151,7 +151,7 @@ document, updated in place:
   "holder": "shop-7f9c4/1",
   "owner": "9e2d7a10-4c3b-4f8e-a1d2-6b5c4d3e2f10",
   "runId": "019a8b31-2c4d-7e5f-8a6b-1c2d3e4f5a6b",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -447,8 +447,10 @@ data it wrote stays.
 You: remove the data in a once-only migration of its own (`collection("countries").drop()` in an outside step is safe to
 repeat). When no deployed release lists the migration any more, delete its history document by hand:
 `db.getCollection("godwit-history").deleteOne({ _id: "reference-countries" })` in `mongosh`. A release that still lists
-it and starts afterwards runs it again, because its document is missing. Renaming the id of a repeatable is the same as
-deleting one and adding another: the new id runs, the old one becomes unknown.
+it and starts afterwards runs it again, because its document is missing. When `adoptApplied` is configured and every
+other history document is `ADOPTED`, the deletion reopens adoption: the next start with work due calls the hook again.
+Renaming the id of a repeatable is the same as deleting one and adding another: the new id runs, the old one becomes
+unknown.
 
 ### A blank revision
 

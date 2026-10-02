@@ -120,7 +120,7 @@ How the states and origins combine:
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -153,7 +153,7 @@ does not ([locking.md](locking.md#a-crashed-holder)).
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -183,7 +183,7 @@ that run applies, `lastError` is removed and `attempts` stays at 2.
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -208,7 +208,7 @@ A shop database migrated by hand before godwit, with `003-file-store` in its `sc
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -240,7 +240,7 @@ A shop database migrated by hand before godwit, with `003-file-store` in its `sc
   "holder": "shop-7f9c4/1",
   "owner": "0c4d1a7e-58f2-4b39-8e61-2d9a3f7b5c80",
   "runId": "019a1f3e-2c5d-7b80-9e1f-4a5b6c7d8e9f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -270,7 +270,7 @@ those ids known, so they never show up as unknown applied ids, even after the co
   "holder": "ops-laptop-3/48211",
   "owner": "e2b7f9a4-0d13-4c6e-b8a5-91f2c3d4e5a6",
   "runId": "0199b0d7-4e21-7f00-8a3b-6c5d4e3f2a10",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -302,7 +302,7 @@ document, it creates one with `kind: "ONCE"`, `steps: []` and `attempts: 0`.
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -335,7 +335,7 @@ with `attempts: 1` (attempts count from the last `APPLIED`), and on success `rev
   "holder": "shop-c55d0/1",
   "owner": "71d3a9c2-5e8f-4b10-a6c7-d8e9f0a1b2c3",
   "runId": "0199a4c2-9b51-7e23-84d5-2f3a4b5c6d7e",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -361,7 +361,7 @@ with `attempts: 1` (attempts count from the last `APPLIED`), and on success `rev
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -392,7 +392,7 @@ Staging runs with `OutOfOrder.RUN`, so `007` ran behind `008` and says so:
   "holder": "shop-staging-1/1",
   "owner": "a4c8e2f0-1b3d-4f5a-9c7e-6d8b0a2c4e6f",
   "runId": "0199a8f1-3c2d-7a10-b4e5-f6a7b8c9d0e1",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```
@@ -450,8 +450,9 @@ is the step's exception ([failure-and-recovery.md](failure-and-recovery.md)).
 
 ## `status()` and `requireUpToDate()`
 
-`status(migrations)` says what `migrate` with `Target.Latest` would do, without taking the lock or writing anything. It
-validates the list first (and throws `InvalidMigrationsException` for an invalid one), then reads history.
+`status(migrations)` says what `migrate` with `Target.Latest` would do, without taking the lock or writing anything,
+except while the adoption hook can still run ([edge cases](#edge-cases)). It validates the list first (and throws
+`InvalidMigrationsException` for an invalid one), then reads history.
 
 | Property | Meaning |
 |---|---|
@@ -575,24 +576,51 @@ WARN  godwit - Marked migration applied id=008-customer-email-lower-index reason
 
 | Existing document | Result |
 |---|---|
+| any, while adoption has not ended (`adoptApplied` set; history empty or only `ADOPTED`) | `IllegalStateException`, nothing written (the third limit below) |
 | none | A new document: `kind: "ONCE"`, `state: "APPLIED"`, `origin: "MARKED"`, `reason`, `attempts: 0` |
 | `RUNNING` or `FAILED`, once-only | Becomes `APPLIED`/`MARKED` with `reason`; `lastError` and `checkpoint` are removed |
-| `APPLIED` (any origin) | Unchanged; the reason is not recorded |
-| `kind: "REPEATABLE"` or `"EVERY_START"`, not `APPLIED` | `IllegalArgumentException`, nothing written |
+| `APPLIED`, once-only (any origin) | Unchanged; the reason is not recorded |
+| `kind: "REPEATABLE"` or `"EVERY_START"`, in any state (`APPLIED` included) | `IllegalArgumentException`, nothing written |
 
 It waits for the lock like `migrate` (up to `LockConfig.waitTimeout`), so it never marks a migration that a live run is
 executing: the run finishes first. `reason` must not be blank. The id is not checked against any list; a typo shows up
 as an unknown applied id on the next `migrate` ([edge cases](#edge-cases)).
 
-Two limits:
+Three limits:
 
 - **Once-only migrations only.** An every-start migration is due on every start whatever its document says, and a
   repeatable stays due until a run applies its current revision (`MARKED` would keep the old `revision`). Marking either
   would change nothing, so `markApplied` refuses. The way past a failing repeatable or every-start migration is code:
   fix it, or remove it from the list.
 - **Order.** Marking an id while once-only migrations listed before it are still pending makes those out of order on
-  the next `migrate` ([ordering-and-validation.md](ordering-and-validation.md#out-of-order)). Mark ids in list order,
-  or after the migrations before them have applied.
+  the next `migrate` ([ordering-and-validation.md](ordering-and-validation.md#out-of-order)). Mark an id after the
+  migrations before it have applied, or with them when they are applied too. To record several applied ids, such as
+  on a database whose history was lost or that godwit never tracked, stop every instance and mark the last-listed
+  first: a start between two marks then finds the ids not yet marked pending before a marked one, which the default
+  `OutOfOrder.FAIL` refuses. Marked first-listed first, the same start would find a valid prefix and run the rest over
+  data that already has them
+  ([history lost](adopting-an-existing-database.md#history-is-lost-while-the-hook-is-configured)).
+- **Not before adoption ends.** A `MARKED` document is not an adoption document: the first mark ends adoption, and
+  `GodwitConfig.adoptApplied` is not called while the mark exists. History is no longer empty, so the mark also turns
+  off the untracked-database guard. A mark made before the hook has recorded every applied id would let the ids it has
+  not recorded run on the next start, over the live data. So on a `Godwit` built with `adoptApplied`, `markApplied`
+  refuses while history is empty or holds only `ADOPTED` documents: under the lock, on the history it reads there, it
+  throws and writes nothing.
+
+  ```text
+  java.lang.IllegalStateException: adoption has not ended on this database; run migrate() first so the adoptApplied hook adopts, or call markApplied from a Godwit built without adoptApplied
+  ```
+
+  Let a start adopt first when that start will not run the id: once history holds a document that adoption did not
+  write, the mark goes through. An id listed after every id the hook returns is one the first start runs, over data
+  that already has its effect, before anyone can mark it; make the hook return it, or add it to the old record, and
+  then start, so that it is adopted instead. A mark from a `Godwit` built from the same configuration with
+  `adoptApplied = null` (`config.copy(adoptApplied = null)`, which keeps the app's `historyCollection` and
+  `lockCollection`) is not refused; use one when the hook has recorded every id it returns but adoption has not ended
+  (a refused gap, or an adopting start that ran nothing else), or to record what was applied after history was lost,
+  with every instance stopped
+  ([adopting-an-existing-database.md](adopting-an-existing-database.md#markapplied-before-the-first-start),
+  [history lost](adopting-an-existing-database.md#history-is-lost-while-the-hook-is-configured)).
 
 ## Log lines
 
@@ -608,7 +636,9 @@ Every log line in these docs prints its values the same way:
 | Text, numbers | as they are, without quotes, spaces included | `holder=shop-7f9c4/1`, `durationMs=84` |
 | Lists | in brackets, comma-separated | `steps=[OUTSIDE_TRANSACTION, IN_TRANSACTION]`, `appliedAfter=[008-cart-currency]` |
 | Times | ISO-8601 instants with milliseconds | `expiresAt=2026-10-02T10:15:00.210Z` |
-| `error` on `Migration failed` | the exception's class and message | `error=java.net.http.HttpTimeoutException: request timed out` |
+| `error` on `Migration failed` | the class and message of the exception the step threw | `error=java.net.http.HttpTimeoutException: request timed out` |
+| `error` on `Lock renewal failed` and `Lock release failed` | the class and message of the exception the lock operation threw | `error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
+| `reason` on `Lost migration lock` | `NOT_OWNER` when a renewal matched no lock document with this run's owner token (another run holds the lock, or the document was deleted); `DEADLINE_PASSED` when no renewal succeeded within `lease - safetyMargin` of the last one | `reason=DEADLINE_PASSED` |
 | `error` on `Retrying transaction` | the code name and code of the error the previous attempt's body threw, or `commit` when the body returned and the commit failed with a transient error | `error=WriteConflict (112)`, `error=commit` |
 
 | Level | Message | Keys | Example |
@@ -616,7 +646,10 @@ Every log line in these docs prints its values the same way:
 | INFO | Migrations up to date | `runId`, `checked`, `durationMs` | `Migrations up to date runId=0199a4c2-... checked=7 durationMs=6` |
 | INFO | Waiting for migration lock | `holder`, `holderRunId`, `expiresAt`, `waitedMs` (every 10 s) | `Waiting for migration lock holder=shop-7f9c4/1 holderRunId=0199a4c2-... expiresAt=2026-10-02T10:15:00.210Z waitedMs=10004` |
 | INFO | Acquired migration lock | `runId`, `lockWaitMs` | `Acquired migration lock runId=0199a4c2-... lockWaitMs=212` |
-| INFO | Adopted applied migrations | `adopted`, `ignored` | `Adopted applied migrations adopted=[001-initial-setup, 002-carts, 003-file-store] ignored=[2025-02-cart-index-hotfix]` |
+| WARN | Lock renewal failed | `runId`, `holder`, `error` (the run holds the lock until its local deadline) | `Lock renewal failed runId=0199a4c2-... holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
+| WARN | Lost migration lock | `runId`, `holder`, `reason` (once per run) | `Lost migration lock runId=0199a4c2-... holder=shop-7f9c4/1 reason=DEADLINE_PASSED` |
+| WARN | Lock release failed | `runId`, `holder`, `error` (the lease ends on its own) | `Lock release failed runId=0199a4c2-... holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
+| INFO | Adopted applied migrations | `adopted` (the ids this call recorded), `ignored`; logged on every call of the hook | `Adopted applied migrations adopted=[001-initial-setup, 002-carts, 003-file-store] ignored=[2025-02-cart-index-hotfix]` |
 | INFO | Recorded superseded migration | `id`, `supersedes` | `Recorded superseded migration id=100-baseline supersedes=[001-initial-setup, ..., 006-order-totals]` |
 | WARN | Resuming interrupted migration | `id`, `attempts` | `Resuming interrupted migration id=006-order-totals attempts=2` |
 | WARN | Running out-of-order migration | `id`, `appliedAfter` | `Running out-of-order migration id=007-product-slugs appliedAfter=[008-cart-currency]` |
@@ -741,7 +774,9 @@ not stored. Nothing is logged.
 `migrate` still finds `008-customer-email-lower-index` due (and fails on the same index conflict), and warns about the
 unknown `008-customer-email-lower-indx` on every start. Run `markApplied` with the right id. The typo's document stays
 as an unknown applied id. Because nothing ran under it, it is safe to delete in the shell:
-`db.getCollection("godwit-history").deleteOne({ _id: "008-customer-email-lower-indx", origin: "MARKED" })`.
+`db.getCollection("godwit-history").deleteOne({ _id: "008-customer-email-lower-indx", origin: "MARKED" })`. When
+`adoptApplied` is configured and every other document is `ADOPTED`, the deletion reopens adoption: the next start with
+work due calls the hook again.
 
 **`markApplied` with a blank reason.**
 `markApplied("008-customer-email-lower-index", reason = " ")` throws `IllegalArgumentException` before taking the lock or
@@ -751,7 +786,10 @@ writing anything.
 A database migrated by hand has no godwit history; the shop is configured with `adoptApplied`. Before any shop process
 has started on it, `status()` reports every migration pending, because adoption runs only inside `migrate`, under the
 lock. A worker calling `requireUpToDate` fails until a shop process has migrated (and adopted) the database. Start the
-shop first, or use `awaitUpToDate` in the worker.
+shop first, or use `awaitUpToDate` in the worker. The same holds while history holds only `ADOPTED` documents (an
+interrupted adoption, a refused gap): `status()` lists the ids adoption has not recorded as pending, and reports
+neither an out-of-order or partial-squash conflict nor an untracked database, because the hook, which only `migrate`
+calls, may still resolve them.
 
 **Every-start migrations and `status()`.**
 `status()` never lists an every-start migration as pending, even when its last run failed. `requireUpToDate` therefore

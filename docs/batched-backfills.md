@@ -105,7 +105,7 @@ commits, so the server discards it. History holds:
   "holder": "shop-7f9c4/1",
   "owner": "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f",
   "runId": "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```

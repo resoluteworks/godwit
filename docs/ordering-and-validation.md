@@ -306,8 +306,12 @@ shop's test fixtures ([testing](testing.md#fixtures)):
 ## Checks against the database
 
 After reading history, godwit compares the list with it. These checks need the database, so `validateMigrations`
-cannot run them. `status()` reports them in `MigrationStatus.problems` without throwing; `migrate` and
-`requireUpToDate` throw. `migrate` runs them before taking the lock and again under the lock, after adoption.
+cannot run them. `status()` reports them in `MigrationStatus.problems` without throwing, except the out-of-order,
+squash and untracked-database checks while the adoption hook can still run; `migrate` and `requireUpToDate` throw.
+`migrate` runs them before taking the lock and again under the lock, after adoption. While the adoption hook can still
+run (it is configured and history holds nothing but `ADOPTED` documents), the out-of-order and squash checks run only
+under the lock, after the hook, because the hook may fill the gap they would report; the untracked-database check
+always runs under the lock.
 
 | Check | Default | On failure | Configured by |
 |---|---|---|---|
@@ -435,7 +439,7 @@ WARN  godwit - Running out-of-order migration id=007-product-slugs appliedAfter=
   "holder": "shop-staging-1/1",
   "owner": "a4c8e2f0-1b3d-4f5a-9c7e-6d8b0a2c4e6f",
   "runId": "0199a8f1-3c2d-7a10-b4e5-f6a7b8c9d0e1",
-  "godwitVersion": "1.0.0",
+  "godwitVersion": "0.1.0",
   "v": 1
 }
 ```

@@ -32,6 +32,8 @@ numbers are stable, so a discussion, a commit or a review comment can cite them 
 | [DD-22](#dd-22-unknown-applied-ids-warn-by-default) | Unknown applied ids warn by default | [Ordering and validation](ordering-and-validation.md) |
 | [DD-23](#dd-23-one-driver-version-as-an-api-dependency) | One driver version, as an `api` dependency | [Architecture](architecture.md) |
 | [DD-24](#dd-24-three-ddl-helpers) | Three DDL helpers | [Outside-transaction steps](outside-transaction-steps.md) |
+| [DD-25](#dd-25-0x-until-proven-in-production) | 0.x until proven in production | [Implementation plan](development/implementation-plan.md) |
+| [DD-26](#dd-26-jvm-21-and-kotlin-24) | JVM 21 and Kotlin 2.4 | [README](../README.md#requirements) |
 
 [Decisions that follow from these](#decisions-that-follow-from-these) lists the narrower decisions each page records.
 
@@ -277,7 +279,10 @@ production, during an incident.
 A failed transactional step already rolls back on its own, and an outside step converges when it runs again.
 
 **Consequences.** Rolling back a release means running older code on a newer schema, so migrations in a rolling deploy
-only add. godwit warns about the newer ids and continues (DD-22).
+only add. godwit warns about the newer ids and continues (DD-22). The escape hatch is narrow: `markApplied` takes the
+lock, refuses a repeatable or every-start migration, and on a `Godwit` built with `adoptApplied` refuses while adoption
+has not ended (DD-14), so a mark from the `Godwit` that adopts cannot keep the hook from recording the applied ids; a
+`Godwit` built from the same configuration without the hook is the deliberate path for a repair.
 
 **In depth.** [Failure and recovery](failure-and-recovery.md#no-down-or-rollback-hooks).
 
@@ -303,7 +308,9 @@ production database run the repeatable against the same schema.
 
 **Consequences.** The application changes the revision in the same commit as the code. Revisions are compared for
 equality: an older release started after a newer one applies its own revision again. A repeatable or every-start
-migration deleted from the code leaves an `APPLIED` history document that reports as unknown applied.
+migration deleted from the code leaves an `APPLIED` history document that reports as unknown applied; godwit has no
+API to remove it, and the documented procedure is to delete that document by hand
+([repeatable migrations](repeatable-migrations.md#deleting-a-repeatable-or-every-start-migration)).
 
 **In depth.** [Repeatable migrations](repeatable-migrations.md#design-decisions).
 
@@ -333,26 +340,54 @@ application writes new documents in the new shape.
 ## DD-14. Adoption through an application-supplied hook
 
 **Decision.** `GodwitConfig(adoptApplied = { db -> Set<String> })` returns the ids already applied to a database
-migrated by another tool, or by hand. godwit calls it under the lock, only while its history is empty, records the
-declared once-only ids (and ids named in a `supersedes` list) as `ADOPTED` in one transaction, and logs the rest. The
-adopted ids must be a prefix of the once-only list. A database with collections, no history and nothing adopted is
-refused (`UntrackedDatabase.REFUSE`; `RUN_ALL` opts in).
+migrated by another tool, or by hand. godwit calls it under the lock, on every start that has work due while its
+history holds nothing but `ADOPTED` documents (an empty history included). It records the declared once-only ids (and
+ids named in a `supersedes` list) that history does not hold yet as `ADOPTED`, with idempotent upserts that only
+insert (in one transaction on a replica set; one at a time, last-listed first, on a standalone server), and logs the
+rest. A history document of another origin (`RAN`, `SUPERSEDED`, `MARKED`) ends adoption: while one exists, the hook
+is not called. godwit decides from the history each start reads, so deleting every such document by hand reopens
+adoption. While the hook can still run, the out-of-order and partial-squash checks are evaluated under the lock, after
+the hook has run and its ids are recorded, never before the lock. The adopted ids must be a prefix of the once-only
+list. A database with collections, no history and nothing adopted is refused (`UntrackedDatabase.REFUSE`; `RUN_ALL` opts
+in).
 
 **Options considered.**
 
 - A reader built into godwit for each other tool's record format.
 - A declarative description of the old record (collection, id field, applied filter).
 - An explicit second startup call, or reconciliation on every start.
-- An application-supplied hook that godwit calls once (chosen).
+- A hook called only while history is empty, its ids recorded all at once.
+- A hook called until the first document of another origin, recording only what is missing (chosen).
 
-**Rationale.** godwit stays independent of every other tool: any record the application can read can be adopted, and
-a record kept by hand has no format to build a reader for. After the first start, godwit's history is the only source
-of truth. The guard exists because the two failures are not symmetric: a wrong collection name in the hook imports
-nothing, everything looks pending, and running every migration over live data overwrites fields and fails on unique
-indexes. A refusal costs one exception and one line of configuration.
+**Rationale.** godwit stays independent of every other tool: any record the application can read can be adopted, and a
+record kept by hand has no format to build a reader for. Once a migration has run, been recorded as superseded or been
+marked, godwit's history is the only source of truth. Until then, calling the hook again makes an interrupted adoption
+complete itself. On a replica set the ids commit in one transaction, so an interrupted adoption simply happens again. On
+a standalone server, which has no transactions, a crash can leave `004` and `003` recorded and `002` and `001` missing,
+and a hook called only on an empty history would never run again to fill them in. Recording is an upsert of the ids
+history lacks, so a repeated call changes nothing that is recorded. The order checks wait for the hook because the
+partial state is itself a gap. Checked before the lock, it would throw `PlanConflictException` under the default
+`OutOfOrder.FAIL` on every start before the hook could complete the adoption. Under `OutOfOrder.RUN` the pre-lock plan
+reports no conflict; the missing ids are not run because the plan that runs is made under the lock, after the hook has
+recorded them. Writing the ids last-listed first keeps a partial adoption visible as a gap or a partial supersede, not
+as a shorter prefix, to a start that no longer has the hook. The guard exists because the two
+failures are not symmetric: a wrong collection name in the hook imports nothing, everything looks pending, and running
+every migration over live data overwrites fields and fails on unique indexes. A refusal costs one exception and one line
+of configuration.
 
 **Consequences.** The application writes and tests a few lines of Kotlin, and can leave the hook configured until
-every database is adopted. godwit never writes to the old record.
+every database is adopted. The hook runs on every start that takes the lock until a document of another origin
+exists, so it must be a pure read: no writes, no side effects, the same result for the same old record; each of those
+starts pays for its read under the lock. A start with nothing due takes the fast path and does not call it. Adoption
+only adds: an id recorded on an earlier call stays recorded when the hook stops returning it. A `MARKED` document ends
+adoption and turns off the untracked-database guard, so a mark made before the hook has recorded every applied id would
+let the ids it has not recorded run on the next start, over the live data. `markApplied` therefore throws
+`IllegalStateException` and writes nothing while `adoptApplied` is set and history holds no document whose origin is
+other than `ADOPTED` (an empty history included); the check runs under the lock `markApplied` takes, on the same
+history read. A deliberate manual repair, such as recording what was applied after history was lost on a database that
+still has the old record, marks from a `Godwit` built from the same configuration with `adoptApplied = null`, so that
+the marks land in the same history and lock collections, after stopping every instance. godwit never writes to the old
+record.
 
 **In depth.** [Adopting an existing database](adopting-an-existing-database.md#the-application-supplies-the-applied-ids).
 
@@ -570,6 +605,49 @@ indexes are not covered.
 
 **In depth.** [Outside-transaction steps](outside-transaction-steps.md#three-helpers-and-no-wrapper-over-the-index-api).
 
+## DD-25. 0.x until proven in production
+
+**Decision.** The first release of `godwit-core` and `godwit-test` is `0.1.0`. godwit releases 0.x versions until it
+has run in a production application, then releases `1.0.0`. During 0.x a breaking change raises the minor version
+(`0.1.0` to `0.2.0`); from `1.0.0` on it raises the major version.
+
+**Options considered.**
+
+- `1.0.0` as the first release, because the API is designed and documented in full before it.
+- `0.1.0`, and 0.x until a production application has run it (chosen).
+
+**Rationale.** A design that is complete on paper and covered by tests has still not met a production database, a
+rolling deploy or an adoption of a real record. A version number is a promise about stability, and godwit makes it
+once production has tested the promise, not before.
+
+**Consequences.** An application that uses godwit during 0.x checks each new minor version for breaking changes
+before it upgrades. History documents record the version that wrote them (`godwitVersion: "0.1.0"`); a change of the
+document format still gets a new `v`, whatever the version number.
+
+**In depth.** [Implementation plan](development/implementation-plan.md#decisions-settled-before-p0).
+
+## DD-26. JVM 21 and Kotlin 2.4
+
+**Decision.** godwit's bytecode targets Java 21 (`jvmToolchain(21)`), and a consuming application compiles with
+Kotlin 2.4 or later. godwit is built with Kotlin 2.4.20, without lowering `apiVersion` or `languageVersion`.
+
+**Options considered.**
+
+- Bytecode for Java 17, to reach applications that have not moved to 21.
+- Compiling with `apiVersion` and `languageVersion` 2.2, so older Kotlin compilers can read godwit's metadata.
+- Java 21 and Kotlin 2.4 (chosen).
+
+**Rationale.** Java 21 is a long-term support release and the toolchain the build and CI use, so the bytecode matches
+what is tested, and it runs on every later JDK. Lowering the Kotlin language and API versions would hold godwit's own
+code back and add a compatibility matrix that nothing tests, for consumers nobody has asked to support.
+
+**Consequences.** An application on Java 17 cannot load godwit's classes, and one that compiles with Kotlin older
+than 2.4 is not supported: nothing tests it. The consumer smoke project of the release compiles with Kotlin 2.4.
+Lowering either baseline later does not break existing consumers.
+
+**In depth.** [README](../README.md#requirements),
+[implementation plan](development/implementation-plan.md#decisions-settled-before-p0).
+
 ## Decisions that follow from these
 
 Each page records the narrower decisions that follow from the ones above:
@@ -589,11 +667,13 @@ Each page records the narrower decisions that follow from the ones above:
 | `FAILED` written outside the transaction, fenced on the owner token and `RUNNING` | DD-10 | [Failure and recovery](failure-and-recovery.md#failed-written-outside-the-transaction-fenced) |
 | Paging by `_id`, one transaction per page with the checkpoint inside | DD-13 | [Batched backfills](batched-backfills.md#paging-by-_id) |
 | Only declared ids are adopted, as a prefix; godwit never writes to the old record | DD-14 | [Adopting an existing database](adopting-an-existing-database.md#only-declared-ids-are-imported) |
+| The hook runs until something other than adoption is recorded; the order checks wait for it | DD-7, DD-14 | [Adopting an existing database](adopting-an-existing-database.md#the-hook-runs-until-something-other-than-adoption-is-recorded), [architecture](architecture.md#one-migrate-call) |
+| `markApplied` refuses until adoption ends | DD-11, DD-14 | [Adopting an existing database](adopting-an-existing-database.md#markapplied-refuses-until-adoption-ends) |
 | A recorded baseline is exempt from the out-of-order policy | DD-7, DD-15 | [Squashing migrations](squashing-migrations.md#a-recording-is-not-a-run) |
 | One list per database in a multi-module application | DD-6, DD-8 | [Libraries and modules](libraries-and-modules.md#one-list-per-database-in-a-multi-module-app) |
 | One immutable configuration; every default is a production value | DD-21 | [Configuration](configuration.md#one-immutable-config-every-default-a-production-value) |
 | Lock settings validated when the configuration is built | DD-9 | [Configuration](configuration.md#the-relations-between-lock-settings-are-checked-when-the-config-is-built) |
-| A pure planner; conflicts checked before the fast path; the untracked guard under the lock | DD-7, DD-8, DD-14 | [Architecture](architecture.md#a-pure-planner), [architecture](architecture.md#one-migrate-call) |
+| A pure planner; conflicts checked before the fast path, except those adoption can still resolve; the untracked guard under the lock | DD-7, DD-8, DD-14 | [Architecture](architecture.md#a-pure-planner), [architecture](architecture.md#one-migrate-call) |
 | The `RUNNING` marker committed outside the step's transaction | DD-10 | [Architecture](architecture.md#the-marker-outside-the-transaction) |
 | Server time for the lease, client time for history timestamps | DD-9, DD-10 | [Architecture](architecture.md#server-time-for-the-lease-client-time-for-history) |
 | `org.bson.Document` for bookkeeping, on the default codec registry | DD-23 | [Architecture](architecture.md#orgbsondocument-for-bookkeeping) |
