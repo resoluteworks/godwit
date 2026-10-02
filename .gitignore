@@ -1,0 +1,8 @@
+.DS_Store
+.env*
+.gradle
+.idea
+.kotlin
+build
+out
+docs/dokka
