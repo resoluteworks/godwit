@@ -20,6 +20,3 @@ jobs:
       - run: python3 scripts/coverage-gate.py
       - run: ./gradlew -p docs-snippets compileKotlin
       - run: scripts/check-docs.sh
-      - run: ./gradlew coverallsJacoco
-        env:
-          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}

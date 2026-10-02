@@ -191,13 +191,11 @@ jobs:
       - run: python3 scripts/coverage-gate.py
       - run: ./gradlew -p docs-snippets compileKotlin
       - run: scripts/check-docs.sh
-      - run: ./gradlew coverallsJacoco
-        env:
-          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
 ```
 
 `ubuntu-latest` has Docker, which Testcontainers needs. `check-docs.sh` builds offline, so the step before it resolves
-the `docs-snippets` build's dependencies into the Gradle cache.
+the `docs-snippets` build's dependencies into the Gradle cache. CI is the gate and uploads nothing: the Coveralls
+report is uploaded by `make test`, which reads `COVERALLS_REPO_TOKEN` from `.env`.
 
 **Behaviours.**
 
