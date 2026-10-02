@@ -26,6 +26,8 @@ tasks.withType<Test>().configureEach {
     // The test fixtures read the container images from these properties; they have no copy of the versions.
     systemProperty("godwit.mongoImage", providers.gradleProperty("mongoImage").get())
     systemProperty("godwit.atlasLocalImage", providers.gradleProperty("atlasLocalImage").get())
+    // The version the build writes into godwit-core, which history documents carry as godwitVersion.
+    systemProperty("godwit.version", providers.gradleProperty("godwitVersion").get())
 }
 
 // Specs tagged Atlas need the Atlas local image and run only in atlasTest. The test task keeps Gradle's default of

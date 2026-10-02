@@ -275,9 +275,9 @@ those ids known, so they never show up as unknown applied ids, even after the co
 }
 ```
 
-`markApplied` sets `state`, `origin`, `reason`, `holder`, `owner`, `runId` and `finishedAt`, and removes `lastError` and
-`checkpoint`. The other fields (`steps`, `attempts`, `durationMs`) are those of the failed run. For an id with no
-document, it creates one with `kind: "ONCE"`, `steps: []` and `attempts: 0`.
+`markApplied` sets `state`, `origin`, `reason`, `holder`, `owner`, `runId`, `finishedAt`, `godwitVersion` and `v`, and
+removes `lastError` and `checkpoint`. The other fields (`steps`, `attempts`, `durationMs`) are those of the failed run.
+For an id with no document, it creates one with `kind: "ONCE"`, `steps: []` and `attempts: 0`.
 
 ### A repeatable migration
 
@@ -638,7 +638,7 @@ Every log line in these docs prints its values the same way:
 | Times | ISO-8601 instants with milliseconds | `expiresAt=2026-10-02T10:15:00.210Z` |
 | `error` on `Migration failed` | the class and message of the exception the step threw | `error=java.net.http.HttpTimeoutException: request timed out` |
 | `error` on `Lock renewal failed` and `Lock release failed` | the class and message of the exception the lock operation threw | `error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
-| `reason` on `Lost migration lock` | `NOT_OWNER` when a renewal matched no lock document with this run's owner token (another run holds the lock, or the document was deleted); `DEADLINE_PASSED` when no renewal succeeded within `lease - safetyMargin` of the last one | `reason=DEADLINE_PASSED` |
+| `reason` on `Lost migration lock` | `NOT_OWNER` when a renewal matched no lock document with this run's owner token (another run holds the lock, or the document was deleted); `DEADLINE_PASSED` when no renewal succeeded within `lease - safetyMargin` of the last one, or of the acquire before the first | `reason=DEADLINE_PASSED` |
 | `error` on `Retrying transaction` | the code name and code of the error the previous attempt's body threw, or `commit` when the body returned and the commit failed with a transient error | `error=WriteConflict (112)`, `error=commit` |
 
 | Level | Message | Keys | Example |

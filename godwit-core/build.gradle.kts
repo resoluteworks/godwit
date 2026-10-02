@@ -16,6 +16,15 @@ dependencies {
     implementation("org.slf4j:slf4j-api:$slf4jVersion")
 }
 
+// History documents record the release that wrote them as godwitVersion; the code reads it from this resource.
+tasks.processResources {
+    val godwitVersion = project.version.toString()
+    inputs.property("godwitVersion", godwitVersion)
+    filesMatching("godwit/core/internal/godwit-version.txt") {
+        expand("godwitVersion" to godwitVersion)
+    }
+}
+
 // godwit-core ships with two runtime dependencies besides the Kotlin standard library. This task resolves the runtime
 // classpath, prints the direct dependencies it finds and fails when they are not exactly those two.
 val verifyRuntimeDependencies = tasks.register<VerifyRuntimeDependencies>("verifyRuntimeDependencies") {

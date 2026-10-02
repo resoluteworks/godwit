@@ -46,7 +46,8 @@ import godwit.core.internal.validateCall
  * and "Lock release failed", it is the class and message of the exception the lock operation threw. On "Lost migration
  * lock", `reason` is `NOT_OWNER` (a renewal matched no lock document with this run's owner token: another run holds the
  * lock, or the document was deleted) or `DEADLINE_PASSED` (no renewal succeeded within `lease - safetyMargin` of the
- * last successful one); the heartbeat thread or [StepScope.checkLock], whichever notices first, logs it.
+ * last successful one, or of the acquire before the first); the heartbeat thread or [StepScope.checkLock], whichever
+ * notices first, logs it.
  */
 class Godwit(
     /** The cluster that owns [databaseName]. godwit opens its sessions on it. */

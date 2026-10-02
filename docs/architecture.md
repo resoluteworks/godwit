@@ -165,9 +165,11 @@ stopped. The repeatable and every-start check applies in any state, `APPLIED` in
 ```text
 run(m):
   lock.checkLock()
-  doc = historyStore.markRunning(m)          once-only: conditional upsert; duplicate key (11000) -> already APPLIED by
-                                             another run: skip it, report it as up to date
+  doc = historyStore.markRunning(m)          once-only: conditional upsert, sent once more after a duplicate key
+                                             (11000); a second one -> already APPLIED by another run: skip it,
+                                             report it as up to date
                                              repeatable, every-start: unconditional upsert
+  lock.checkLock()                           a run whose marker landed after another run acquired stops here
   if the previous state was RUNNING: log WARN "Resuming interrupted migration"
   if m is out of order (OutOfOrder.RUN): log WARN "Running out-of-order migration"
   log INFO "Running migration"
@@ -205,6 +207,13 @@ run(m):
 
 - The `RUNNING` marker is written before any step, outside any transaction, with majority write concern, on the same
   causally consistent session that later carries the transaction, so the transaction's snapshot sees it.
+- `checkLock()` runs again right after the marker. A run that lost the lock between its first check and its marker (a
+  pause longer than the lease) can have its marker land after another run acquired the lock and wrote its own marker;
+  the once-only filter matches that `RUNNING` document and takes it over. The other run acquired only after the
+  server lease ended, at least `safetyMargin` after this run's local deadline, so this run's check after the marker
+  throws `LockLostException` before any step runs. The run whose document was taken over finds out at its next fenced
+  write, which matches nothing: it throws `LockLostException` too, and the next start resumes the migration. A stale
+  marker costs a retry, never a second commit.
 - A run that lost the lock writes nothing more to history, with one exception: when a step's own error and the lock
   loss coincide, it still sends the `FAILED` write, so that `lastError` keeps the step's error. That write is fenced on
   this run's owner token and `RUNNING`, so it matches only while no other run has written its marker; once one has,
@@ -263,61 +272,67 @@ The lock collection handle uses majority write concern, majority read concern, p
 codec registry and a 5 s client-side timeout on every operation. In `mongosh` form, with the defaults (`lease` 60 s), the
 history collection `godwit-history` and an owner token `5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f`:
 
-**Acquire.** Take the lock if it is expired, released, missing, or already this run's:
+**Acquire.** An upsert on the lock document's `_id`. Its pipeline takes the lock if it is expired, released or
+missing, and otherwise leaves the document as it is:
 
 ```javascript
 db.getCollection("godwit-lock").findOneAndUpdate(
-  {
-    _id: "godwit-history",
-    $expr: {
-      $or: [
-        { $lte: ["$expiresAt", "$$NOW"] },                              // expired or released; a missing expiresAt counts as expired
-        { $eq: ["$owner", "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f"] }     // this run's own: a retried acquire is idempotent
-      ]
-    }
-  },
+  { _id: "godwit-history" },
   [
     {
-      $set: {
-        owner: { $literal: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f" },
-        holder: { $literal: "shop-7f9c4/1" },                           // $literal: a configured holder may start with "$"
-        runId: { $literal: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f" },
-        acquiredAt: "$$NOW",
-        refreshedAt: "$$NOW",
-        expiresAt: { $add: ["$$NOW", 60000] }
+      $replaceWith: {
+        $cond: [
+          { $lte: ["$expiresAt", "$$NOW"] },                              // expired or released; a missing expiresAt counts as expired
+          {
+            _id: "$_id",
+            owner: { $literal: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f" },
+            holder: { $literal: "shop-7f9c4/1" },                       // $literal: a configured holder may start with "$"
+            runId: { $literal: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f" },
+            acquiredAt: "$$NOW",
+            refreshedAt: "$$NOW",
+            expiresAt: { $add: ["$$NOW", 60000] }
+          },
+          "$$ROOT"                                                        // held by another run: unchanged
+        ]
       }
-    },
-    { $unset: "releasedAt" }
+    }
   ],
   { upsert: true, returnDocument: "after", writeConcern: { w: "majority" } }
 )
 ```
 
-| Lock document | Filter | Result |
-|---|---|---|
-| Missing | no match | The upsert inserts `{_id: "godwit-history", ...}`: acquired |
-| Expired or released | match | Updated: acquired |
-| This run's own (a retry after a lost reply) | match | Updated: acquired |
-| Held by another run | no match | The upsert inserts the same `_id` and fails with duplicate key (11000): not acquired, wait |
-| Missing, two processes at once | no match for either | One insert wins; the other gets 11000: not acquired, wait |
+| Lock document | Result |
+|---|---|
+| Missing | The upsert inserts `{_id: "godwit-history", ...}` with this run's token: acquired |
+| Expired or released | Replaced with this run's token, without `releasedAt`: acquired |
+| Held by this run (the same token again) | Left unchanged; the returned document carries this run's token: acquired |
+| Held by another run | Left unchanged; the returned document carries the other run's token: not acquired, wait |
+| Missing, two processes at once | One insert wins; the other hits the duplicate `_id`, which the server retries as an update, and that update finds the lock held: not acquired, wait |
 
-The duplicate key is the "held" signal. The server's automatic retry of upserts that hit a duplicate key applies only
-to equality filters, which this one is not, so the error always reaches godwit. The returned document must carry this
-run's token; godwit checks it.
+The returned document is the answer: this run's token means acquired, another token means held. The condition lives
+in the pipeline because the server refuses `$expr` in the query of an upsert, and an equality filter on `_id` is what
+lets the server retry an upsert that hits a duplicate key, so two processes racing on a missing document both get a
+document back. A duplicate key that reaches godwit all the same counts as held.
 
 **Renew** (the heartbeat, every `heartbeat`):
 
 ```javascript
 db.getCollection("godwit-lock").updateOne(
-  { _id: "godwit-history", owner: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f" },
+  { _id: "godwit-history", owner: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f", releasedAt: { $exists: false } },
   [{ $set: { refreshedAt: "$$NOW", expiresAt: { $add: ["$$NOW", 60000] } } }],
   { writeConcern: { w: "majority" } }
 )
 ```
 
-`matchedCount` 0 means another run owns the lock, or the document was deleted: the lock is lost.
+`matchedCount` 0 means another run owns the lock, or the document was deleted: the lock is lost. The filter on
+`releasedAt` is for a renewal that reaches the server after this run's release (below); an acquire replaces the whole
+document, so a new acquisition carries no `releasedAt`.
 
-**Release** (in `finally`):
+**Release** (in `finally`). It first stops the heartbeat and waits for a renewal in flight to return, which the 5 s
+timeout bounds, so that the release is the last lock write the run sends. A renewal can still reach the server after
+it: one the client gave up on at its timeout, delivered late by the network. The release keeps `owner` for
+diagnostics, so the renewal's filter on `releasedAt` is what makes such a renewal match nothing, instead of holding a
+released lock for another lease:
 
 ```javascript
 db.getCollection("godwit-lock").updateOne(
@@ -330,19 +345,33 @@ db.getCollection("godwit-lock").updateOne(
 A release that matches nothing changes nothing: the lease already belongs to another run. A release that fails (the
 database is unreachable) is not retried; it logs `Lock release failed` at WARN, and the lease ends on its own.
 
-**Waiting.** While the acquire returns "held", godwit sleeps 250 ms, doubling up to 5 s, each sleep randomised, and
-every 10 s reads the lock document (`findOne({ _id: "godwit-history" })`) to log the holder. When `waitTimeout` passes,
-it reads the document once more for `LockTimeoutException.holder` (null when the lease has ended by then).
+**Waiting.** While the acquire returns "held", godwit sleeps 250 ms, doubling up to 5 s, each sleep a random time
+between half and all of that step, and every 10 s reads the lock document while its lease lasts to log the holder:
+
+```javascript
+db.getCollection("godwit-lock").findOne({
+  _id: "godwit-history",
+  holder: { $type: "string" }, runId: { $type: "string" },
+  acquiredAt: { $type: "date" }, expiresAt: { $type: "date" },   // a document godwit did not write names no holder
+  $expr: { $gt: ["$expiresAt", "$$NOW"] }
+})
+```
+
+When the lease has ended by then, or the document lacks one of those fields (a document written by hand), it logs
+nothing and tries again. When `waitTimeout` passes, it makes a last attempt and reads the document once more for
+`LockTimeoutException.holder` (null in the same cases).
 
 **The heartbeat and the local deadline.** After the acquire, a single daemon thread renews the lease every
-`heartbeat`. Each renewal records the monotonic time it was sent; when it succeeds, the local deadline becomes that time
-plus `lease` minus `safetyMargin`. Before every renewal the thread checks the deadline: once it has passed, the lock is
+`heartbeat`. The first local deadline is the monotonic time the acquire was sent, plus `lease` minus `safetyMargin`.
+Each renewal records the monotonic time it was sent; when it succeeds, the local deadline becomes that time plus
+`lease` minus `safetyMargin`. Before every renewal the thread checks the deadline: once it has passed, the lock is
 lost for good, and the thread stops without renewing (a renewal sent after a long pause could otherwise extend a lease
-the run has already given up). A renewal that throws logs `Lock renewal failed` at WARN and is retried at the next
-tick; the deadline decides. A renewal that matches nothing, or a deadline that passes, marks the lock lost and logs
-`Lost migration lock` at WARN, once per run, with `reason` `NOT_OWNER` or `DEADLINE_PASSED`; when `checkLock()` on the
-step's thread sees the deadline pass first, it logs the line instead. The thread catches every `Throwable`, because an
-exception escaping a scheduled task silently cancels every later run of it.
+the run has already given up). A renewal that succeeds only after the deadline has passed does not move it: the lock
+is lost. A renewal that throws logs `Lock renewal failed` at WARN and is retried at the next tick; the deadline
+decides. A renewal that matches nothing, or a deadline that passes, marks the lock lost and logs `Lost migration lock`
+at WARN, once per run, with `reason` `NOT_OWNER` or `DEADLINE_PASSED`; when `checkLock()` on the step's thread sees
+the deadline pass first, it logs the line instead. The thread catches every `Throwable`, because an exception escaping
+a scheduled task silently cancels every later run of it.
 
 **`checkLock()`** throws `LockLostException` when the lost flag is set or the monotonic clock is past the deadline. It
 does no I/O, so a step can call it once per item.
@@ -362,8 +391,11 @@ db.getCollection("godwit-history").find({}).sort({ _id: 1 }).readConcern("majori
 ```
 
 **`RUNNING` marker, once-only migration.** A conditional upsert. If the document is `APPLIED`, the filter matches
-nothing and the upsert's insert collides with the existing `_id`: duplicate key (11000), which godwit reads as
-"applied by another run" and skips the migration:
+nothing and the upsert's insert collides with the existing `_id`: duplicate key (11000). The same error answers a
+marker that races another first write of a missing document: one insert wins, and the server does not retry the other
+as an update, which it does only for a filter of equalities on `_id`. So godwit sends the marker once more. The
+document exists by then and the filter matches it, unless it is `APPLIED`: a second duplicate key means it is, which
+godwit reads as "applied by another run" and skips the migration:
 
 ```javascript
 db.getCollection("godwit-history").findOneAndUpdate(
@@ -404,8 +436,14 @@ db.getCollection("godwit-history").findOneAndUpdate(
 )
 ```
 
-Why two markers: the once-only marker's conditional filter is what makes a once-only migration impossible to start
-twice, even by a run that lost the lock and does not know it yet. Reused for a repeatable, the same filter would hit
+Both markers set `description` when the migration declares one and remove it when it does not, so the document shows
+the description of its last run. In the pipeline, the description is a `$literal` too, and an absent one is
+`"$$REMOVE"`.
+
+Why two markers: the once-only marker's conditional filter is what makes an applied once-only migration impossible to
+start again, even by a run that lost the lock and does not know it yet. It does not stop such a run's marker from
+taking over another run's `RUNNING` document; the `checkLock()` after the marker and the owner fence handle that
+([running one migration](#running-one-migration)). Reused for a repeatable, the same filter would hit
 11000 on the `APPLIED` document and skip the repeatable forever. The unconditional marker is safe under the lock. The
 one race it leaves (a run that lost the lock commits a repeatable just before the new holder's marker) makes the new
 holder run that repeatable once more at the same revision, which a repeatable tolerates: it is written to run again.
@@ -480,9 +518,10 @@ last-listed first: in the reverse of the list's once-only order, where each migr
 `supersedes` list names, in that list's order.
 
 **`SUPERSEDED` and `MARKED` records.** Under the lock, a conditional upsert on `state != APPLIED`, setting
-`state: "APPLIED"`, the origin, `holder`, `owner`, `runId` and `finishedAt`; inserted documents also get `kind: "ONCE"`,
-`steps: []` and `attempts: 0` (`$setOnInsert`). `SUPERSEDED` stores `supersedes`; `MARKED` stores `reason` and removes
-`lastError` and `checkpoint`. A duplicate key means the id is already `APPLIED`, which leaves it unchanged.
+`state: "APPLIED"`, the origin, `holder`, `owner`, `runId`, `finishedAt`, `godwitVersion` and `v`; inserted documents
+also get `kind: "ONCE"`, `steps: []` and `attempts: 0` (`$setOnInsert`). `SUPERSEDED` stores `supersedes`; `MARKED`
+stores `reason` and removes `lastError` and `checkpoint`. A duplicate key is sent once more, as for the once-only
+marker; a second one means the id is already `APPLIED`, which leaves it unchanged.
 `markApplied` checks the history it reads under the lock first, and writes nothing when it throws:
 `IllegalStateException` while `adoptApplied` is set and every document is `ADOPTED` (or there is none), and
 `IllegalArgumentException` when the id's document has `kind` `REPEATABLE` or `EVERY_START`, in any state.
@@ -499,7 +538,7 @@ token and is `RUNNING`.
 | The run holds the lock throughout | The record matches; data and record commit together |
 | The lock is lost, nobody has taken over | `checkLock()` before the record throws (the local deadline is at least `safetyMargin` before the lease ends): abort |
 | Another run took over and wrote its marker first | The marker changed `owner`: the record matches nothing, `LockLostException`, abort |
-| The stale run wrote its record first, then stalled before the commit | The new run's marker writes the same document outside any transaction, so it waits for the stale transaction to end. If it aborts (lifetime, or the stale run's own check), the marker goes through. If it commits, the marker's filter finds `APPLIED`, gets 11000, and the new run skips the migration |
+| The stale run wrote its record first, then stalled before the commit | The new run's marker writes the same document outside any transaction, so it waits for the stale transaction to end. If it aborts (lifetime, or the stale run's own check), the marker goes through. If it commits, the marker's filter finds `APPLIED`, gets 11000 on both sends, and the new run skips the migration |
 
 In every row, exactly one run's work for the migration is committed or none is. The alternative fence, writing the lock
 document inside every migration transaction, would make every heartbeat renewal a write conflict with the open
@@ -706,15 +745,28 @@ Both names are configurable (`GodwitConfig.historyCollection`, `GodwitConfig.loc
 
 ## Edge cases
 
-**A retried acquire whose first reply was lost.**
-The acquire reached the server and took the lock, but the reply was lost to a network blip; the driver retries the
-`findOneAndUpdate` (retryable write), or godwit's next poll sends it again. The filter's `owner == token` branch matches
-this run's own lock, so the retry succeeds instead of reporting the lock as held by someone else.
+**An acquire whose reply is lost.**
+The acquire reached the server and took the lock, but its reply was lost. After a network error the driver sends the
+`findOneAndUpdate` once more as the same retryable write, and the server answers it with the result of the first
+execution, which carries this run's token: acquired. When the driver does not retry the error, or its retry fails too,
+the driver's exception propagates from `migrate` unchanged: godwit does not poll again after an error. The lease that
+the lost reply granted then holds every start off, this process's restart included, until it ends on its own, at most
+`lease` later.
 
 **A stale run's `APPLIED` commit lands just before the takeover.**
 `shop-7f9c4/1` lost the lock while its `004-order-status` transaction was committing; `shop-2b8e1/1` planned `004` as due.
 Its marker waits for the stale transaction, which commits; the marker's filter then finds `APPLIED`, the upsert hits
-11000, and `shop-2b8e1/1` skips `004`, reporting it as up to date. Nothing ran twice.
+11000, and again when godwit sends it once more, and `shop-2b8e1/1` skips `004`, reporting it as up to date. Nothing
+ran twice.
+
+**Two first markers at once.**
+`shop-7f9c4/1` lost the lock without knowing it, after its check before `004-order-status` and before its marker, and
+`004` has no document yet. `shop-2b8e1/1` acquires and sends its marker for `004` at the moment the stale marker
+arrives. One insert wins; the other gets 11000 although the document is `RUNNING`, so godwit sends that marker once
+more, and it takes the document over. If `shop-2b8e1/1` lost the race, it now owns `004` and runs it. If
+`shop-7f9c4/1` lost, its marker took the document over, and its `checkLock()` right after the marker throws, because
+its deadline passed before `shop-2b8e1/1` could acquire; `shop-2b8e1/1`'s fenced writes then match nothing, it throws
+`LockLostException`, and the next start runs `004`. Neither run skips `004` as applied.
 
 **The same race for a repeatable.**
 The stale run commits `reference-countries` at revision `"2026-10-01"` just before the new holder's unconditional marker.

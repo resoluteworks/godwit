@@ -325,7 +325,9 @@ nothing behind. A crash inside an outside step leaves partial DDL instead, which
 step is idempotent ([failure-and-recovery.md](failure-and-recovery.md#process-killed-mid-outside-step)).
 
 You can watch this in a test by planting a lock document whose lease ends 10 s from now, as a crashed process leaves
-it:
+it. Plant every field godwit writes: a document without `holder`, `runId`, `acquiredAt` or `expiresAt` still holds the
+lock until `expiresAt`, but names no holder, so waiting processes log no `Waiting for migration lock` line and
+`LockTimeoutException.holder` is null.
 
 ```kotlin
 "a start waits for a crashed holder's lease to end, then runs" {
@@ -335,6 +337,8 @@ it:
             .append("owner", "token-of-a-crashed-process")
             .append("holder", "shop-dead1/1")
             .append("runId", "0199a4c1-0d2e-7a11-8c3b-5d6e7f809a1b")
+            .append("acquiredAt", Date())
+            .append("refreshedAt", Date())
             .append("expiresAt", Date.from(Instant.now().plusSeconds(10)))
     )
 
@@ -353,8 +357,9 @@ reach a majority, a stop-the-world pause longer than the lease. godwit detects i
 - **A renewal fails to match.** The heartbeat renews with a filter on the owner token. If the lock document now has
   another owner (or was deleted), the renewal matches nothing and the lock is lost.
 - **The local deadline passes.** After every successful renewal, the holder sets a deadline on its own monotonic clock:
-  the time it sent that renewal, plus `lease`, minus `safetyMargin` (60 s − 10 s = 50 s by default). If no renewal
-  succeeds before it, the lock is lost. Because the deadline counts from when the renewal was sent, the holder gives
+  the time it sent that renewal, plus `lease`, minus `safetyMargin` (60 s − 10 s = 50 s by default). Until the first
+  renewal succeeds, the deadline counts from the time it sent the acquire. If no renewal succeeds before it, the lock
+  is lost. Because the deadline counts from when the renewal was sent, the holder gives
   the lock up at least `safetyMargin` before the server lets anyone else take it.
 
 A renewal that throws (it timed out, or no primary was reachable) does not lose the lock by itself: it logs a warning
@@ -604,9 +609,9 @@ nothing ([history-and-reports.md](history-and-reports.md#status-and-requireuptod
 ## Edge cases
 
 **Two processes start on a database that has never had a lock document.**
-Both send the acquire upsert at the same moment. One inserts the document and holds the lock; the other gets a
-duplicate-key error (11000) on the `_id`, which godwit reads as "held", and waits like any other process. You do
-nothing.
+Both send the acquire upsert at the same moment. One inserts the document and holds the lock; the other's insert
+hits the duplicate `_id`, which the server retries as an update. That update finds the lock held and changes nothing,
+so the second process reads "held" and waits like any other. You do nothing.
 
 **`waitTimeout` is shorter than a migration.**
 With `waitTimeout = 2.minutes` and `006-order-totals` taking 2.5 minutes, `shop-2b8e1/1` and `shop-c55d0/1` throw

@@ -64,7 +64,8 @@ class MigrationFailedException internal constructor(
 
 /**
  * Another process held the lock for longer than [LockConfig.waitTimeout]. [holder] is null when the lock was released
- * as the wait ended. Nothing ran.
+ * as the wait ended, or when the lock document lacks one of the fields godwit writes (one written by hand). Nothing
+ * ran.
  */
 class LockTimeoutException internal constructor(val holder: LockHolder?, val waited: Duration) :
     GodwitException("Waited $waited for the migration lock, held by ${holder?.holder ?: "nobody"}")

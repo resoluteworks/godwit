@@ -327,7 +327,8 @@ registry, majority read and write concern, primary reads), `HistoryStore.kt`, `M
 - History store, per [architecture](../architecture.md#history-writes):
   - `readAll()`: one `find`, majority read concern, primary.
   - once-only `RUNNING` marker: conditional upsert on `state != APPLIED`, `$inc attempts`, owner token, run id; a
-    duplicate key (11000) means another run applied it: skip, report it up to date.
+    duplicate key (11000) also answers a concurrent first write of a missing document, so the marker is sent once
+    more, and a second duplicate key means another run applied it: skip, report it up to date.
   - repeatable and every-start marker: unconditional pipeline upsert on `{_id}`; `attempts` restarts at 1 after
     `APPLIED`; `revision` is written only when the run applies.
   - the fenced `APPLIED` record, outside a transaction or on the step's session: matches `{_id, owner, state: RUNNING}`;
@@ -339,30 +340,36 @@ registry, majority read and write concern, primary reads), `HistoryStore.kt`, `M
     the history read under the lock lacks, in one `withTransaction` with `checkLock()` before the commit; on a
     standalone server one write per id, `checkLock()` before each, last-listed first (the reverse of the once-only
     order, each migration preceded by the ids its `supersedes` list names, in that list's order).
-  - `SUPERSEDED` and `MARKED` records: conditional upsert on `state != APPLIED`; `steps: []`, `attempts: 0`, no
-    `counts`.
+  - `SUPERSEDED` and `MARKED` records: conditional upsert on `state != APPLIED`, sent once more after a duplicate key
+    like the marker; `steps: []`, `attempts: 0`, no `counts`.
 - Lock:
-  - acquire: `findOneAndUpdate` with a pipeline on `$$NOW`, upsert, owner token per acquisition; 11000 means held.
+  - acquire: `findOneAndUpdate` on `{_id}` with a pipeline on `$$NOW` that takes the lock only when it is free, upsert,
+    owner token per acquisition; a returned document with another owner token means held (the server refuses `$expr`
+    in an upsert's query, and retries the losing insert of a race on `_id` as an update); a driver error propagates
+    and is not polled again.
   - wait: poll every 250 ms to 5 s with jitter; log `Waiting for migration lock` with the holder every 10 s; throw
-    `LockTimeoutException` at `waitTimeout`; `Duration.ZERO` fails at the first refusal.
-  - heartbeat: a daemon thread renews every `heartbeat`; it checks the local deadline before each renewal; a renewal
-    that throws logs `Lock renewal failed` (`runId`, `holder`, `error`) and is retried at the next tick; a renewal
+    `LockTimeoutException` at `waitTimeout`; `Duration.ZERO` fails at the first refusal; a lock document without
+    the fields godwit writes names no holder.
+  - heartbeat: a daemon thread renews every `heartbeat`, fenced on the owner token and on `releasedAt` being absent;
+    it checks the local deadline before each renewal; a renewal that throws logs `Lock renewal failed` (`runId`, `holder`, `error`) and is retried at the next tick; a renewal
     that matches 0 documents, or a deadline that passes, marks the lock lost for good and logs `Lost migration lock`
     (`runId`, `holder`, `reason` `NOT_OWNER` or `DEADLINE_PASSED`) once per run, from the heartbeat thread or from
     `checkLock()`, whichever sees it first.
   - `checkLock()`: no I/O; throws `LockLostException` once the lock is lost or the local deadline
-    (`lease - safetyMargin` after the last renewal was sent, on the monotonic clock) has passed.
+    (`lease - safetyMargin` after the last renewal was sent, or after the acquire was sent before the first renewal,
+    on the monotonic clock) has passed.
   - release: fenced on the owner token, sets `expiresAt` and `releasedAt` to `$$NOW`; a release that throws logs `Lock
     release failed` (`runId`, `holder`, `error`) and is not retried.
   - every lock operation has a 5 s client-side timeout.
 
-**Tests.** All integration tests use short timings (`LockConfig(lease = 3.seconds, heartbeat = 1.seconds,
-safetyMargin = 1.seconds)`).
+**Tests.** All integration tests use short timings (`LockConfig(lease = 3.seconds, heartbeat = 500.milliseconds,
+safetyMargin = 1.seconds)`): the local deadline is 2 s after the last renewal was sent, so a failed renewal leaves the
+next ones time to keep the lock.
 
 | Spec | Covers |
 |---|---|
-| `HistoryStoreTest` | each write's filter, update and fence; the 11000 skip; the repeatable reset of `attempts`; `lastError` cap; a stale owner's `APPLIED` and `FAILED` writes match 0; a `FAILED` write on an `APPLIED` document of the same owner matches 0; the adoption records commit together or not at all; recording adopted ids twice leaves the first records unchanged; an adoption transaction over an id that another run has just adopted commits without error and changes nothing; an adoption write over a `RUNNING` document leaves it `RUNNING`; a lost lock before the adoption commit records nothing and throws `LockLostException` |
-| `MongoLockTest` | first-ever concurrent acquire (the loser sees 11000 and polls); re-acquire by the same owner; acquire after expiry; release by a stale owner changes nothing; a release that throws (a `failCommand` fail point) logs `Lock release failed` and the lease ends on its own; `waitTimeout` and `Duration.ZERO`; the lock document deleted by hand (the next renewal marks the lock lost and logs `Lost migration lock reason=NOT_OWNER`, the next acquire recreates it) |
+| `HistoryStoreTest` | each write's filter, update and fence; the 11000 skip after the second send; a duplicate key on a document that is not `APPLIED` (a fail point) is sent once more and takes the document over; 50 races of two first markers, and of a first marker and a `SUPERSEDED` or `MARKED` record, on missing documents never skip a migration that is not `APPLIED`; the repeatable reset of `attempts`; `lastError` cap; a stale owner's `APPLIED` and `FAILED` writes match 0; a `FAILED` write on an `APPLIED` document of the same owner matches 0; the adoption records commit together or not at all; recording adopted ids twice leaves the first records unchanged; an adoption transaction over an id that another run has just adopted commits without error and changes nothing; an adoption write over a `RUNNING` document leaves it `RUNNING`; a lost lock before the adoption commit records nothing and throws `LockLostException` |
+| `MongoLockTest` | first-ever concurrent acquire (the loser finds the lock held and polls), and 50 such races with one winner each and no duplicate key reaching either process; re-acquire by the same owner; an acquire whose connection drops is retried by the driver; an acquire that took the lock but whose reply failed throws, is not polled again and leaves its lease; a renewal sent after the release matches nothing; a lock document without the fields godwit writes names no holder; acquire after expiry; release by a stale owner changes nothing; a release that throws (a `failCommand` fail point) logs `Lock release failed` and the lease ends on its own; `waitTimeout` and `Duration.ZERO`; the lock document deleted by hand (the next renewal marks the lock lost and logs `Lost migration lock reason=NOT_OWNER`, the next acquire recreates it) |
 | `HeartbeatTest` | renewal keeps the lock past three leases; a renewal that fails once logs `Lock renewal failed` and the next one keeps the lock; a renewal blocked by a fail point (`failCommand` with `blockConnection`, scoped to the holder's `appName`) makes `checkLock()` throw before another process can acquire, with exactly one `Lost migration lock reason=DEADLINE_PASSED` |
 | `LockContentionTest` | 8 threads, each with its own client and owner, acquire and release 50 times; a shared counter proves at most one holder at any moment |
 | `LogCatalogueTest` | the wait, acquire, renewal-failed, lost and release-failed events carry their documented keys |
@@ -395,8 +402,8 @@ driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (sco
 - The `migrate` sequence of [architecture](../architecture.md#one-migrate-call): validate; read history; plan;
   conflicts before the fast path; the fast path (one history read, no lock, `report.lockWait == null`); the topology
   check only when a transactional step is due; acquire; read history again; plan again; run; release in `finally`.
-- Running one migration, per [architecture](../architecture.md#running-one-migration): marker; `Resuming interrupted
-  migration` when the previous state was `RUNNING`; the outside step with its own counters; `checkLock()` between
+- Running one migration, per [architecture](../architecture.md#running-one-migration): marker; `checkLock()` right
+  after it; `Resuming interrupted migration` when the previous state was `RUNNING`; the outside step with its own counters; `checkLock()` between
   steps; `inTransaction` through `ClientSession.withTransaction` with snapshot read concern, majority write concern and
   primary reads; a fresh scope and counters per attempt; `Retrying transaction` and `transactionRetries`; `Slow
   transaction` above `slowTransactionWarning`; the fenced `APPLIED` record as the last write of the transaction; an
@@ -433,7 +440,7 @@ driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (sco
 | `CrashWindowTest` | a child JVM (`CrashMain`) runs a scenario and is killed with `destroyForcibly()` at a point marked by a command listener in the child: after the marker, mid outside step, after the outside step, inside the transaction, and after the commit and before the release. The parent then runs `migrate` and asserts the resume, the `attempts` count, and that every transactional effect (an `$inc` probe) is 1 |
 | `TransactionRetryTest` | `failCommand` fail points: a `TransientTransactionError` re-runs the body with fresh counters and `attempt` 2, after a pause; an `UnknownTransactionCommitResult` retries only the commit; a transient error on commit logs `error=commit`; a body that conflicts for 5 s logs `Retrying transaction` at most once per 10 s and counts every retry; a commit that applies and then times out on the client (`timeoutMS`, a blocked majority acknowledgement) ends `APPLIED`, not `FAILED`, with the `$inc` probe at 1, also for an outside-only `APPLIED` record; `txRetries` in the report and log |
 | `ErrorGuidanceTest` | 251 and 290 after a long attempt (the 60 s threshold is an internal constructor parameter set low in the test), 388, 263, an index build on an existing collection in a transaction, a session from another client; each message carries its guidance, and an unknown cause carries none |
-| `LockLossTest` | a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` without a cause; a step that throws its own error once the deadline has passed: `LockLostException` whose cause is that error, and the document `FAILED` with it as `lastError`; the same after another run's marker took the document: the cause is kept and the `FAILED` write matches nothing; an `inTransaction` call that fails with a network error once the deadline has passed (a `failCommand` fail point with `closeConnection`, which the driver labels `TransientTransactionError` inside a transaction, as it does a server selection timeout): the driver runs the body again, its first `checkLock()` throws, history is unchanged, `LockLostException` without a cause; the same call on a client with `timeoutMS` failing with `MongoOperationTimeoutException`, which `withTransaction` does not retry: `LockLostException` whose cause is the timeout |
+| `LockLossTest` | a run whose marker lands after another process took the lock over and wrote its own marker (the run's marker held back by a `blockConnection` fail point past the lease): the marker takes the document over, the `checkLock()` right after it throws before the outside step runs, the other process's fenced `APPLIED` write matches nothing and it throws `LockLostException`, and the next start applies the migration once; a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` without a cause; a step that throws its own error once the deadline has passed: `LockLostException` whose cause is that error, and the document `FAILED` with it as `lastError`; the same after another run's marker took the document: the cause is kept and the `FAILED` write matches nothing; an `inTransaction` call that fails with a network error once the deadline has passed (a `failCommand` fail point with `closeConnection`, which the driver labels `TransientTransactionError` inside a transaction, as it does a server selection timeout): the driver runs the body again, its first `checkLock()` throws, history is unchanged, `LockLostException` without a cause; the same call on a client with `timeoutMS` failing with `MongoOperationTimeoutException`, which `withTransaction` does not retry: `LockLostException` whose cause is the timeout |
 | `TopologyTest` | a standalone container: `TransactionsUnsupportedException` listing the due transactional migrations, before the lock; an outside-only list runs; a transactional repeatable that becomes due under the lock still throws `TransactionsUnsupportedException` |
 | `DdlHelpersTest` | each helper twice in a row; concurrent `ensureCollection` from two threads; `dropIndexIfExists` of a missing index returns false, also on a MongoDB 8.3 or later image |
 | `SearchIndexTest` (tag `Atlas`) | create, exists, wait until queryable, wait for an existing index that is still building, `SearchIndexNotReadyException`, `checkLock()` between polls |

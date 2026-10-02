@@ -29,6 +29,8 @@ class LockingTest : StringSpec({
                 .append("owner", "token-of-a-crashed-process")
                 .append("holder", "shop-dead1/1")
                 .append("runId", "0199a4c1-0d2e-7a11-8c3b-5d6e7f809a1b")
+                .append("acquiredAt", Date())
+                .append("refreshedAt", Date())
                 .append("expiresAt", Date.from(Instant.now().plusSeconds(10)))
         )
 

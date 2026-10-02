@@ -1,7 +1,11 @@
 package godwit.core.fixtures
 
+import com.mongodb.ConnectionString
+import com.mongodb.MongoClientSettings
+import com.mongodb.event.CommandListener
 import com.mongodb.kotlin.client.MongoClient
 import com.mongodb.kotlin.client.MongoDatabase
+import org.bson.Document
 import org.slf4j.LoggerFactory
 import org.testcontainers.mongodb.MongoDBContainer
 import java.util.UUID
@@ -20,7 +24,7 @@ class TestDatabase internal constructor(val client: MongoClient, val name: Strin
 /**
  * The MongoDB replica set that the tests of this module run against. The container starts on first use and is shared
  * by every test in the JVM; each call to [database] gives a test its own client and a database named by a random UUID,
- * so tests never see each other's data. The server accepts test commands, which the fail points of later phases need.
+ * so tests never see each other's data. The server accepts test commands, which [failCommand] needs.
  */
 object TestMongo {
     private val log = LoggerFactory.getLogger(TestMongo::class.java)
@@ -43,8 +47,43 @@ object TestMongo {
     /** A new client on the replica set. The caller closes it. */
     fun client(): MongoClient = MongoClient.create(connectionString)
 
+    /**
+     * A new client named [appName], so that a fail point can target its commands alone, with [listeners] observing
+     * them. The caller closes it.
+     */
+    fun client(appName: String, vararg listeners: CommandListener): MongoClient = MongoClient.create(
+        MongoClientSettings.builder()
+            .applyConnectionString(ConnectionString(connectionString))
+            .applicationName(appName)
+            .apply { listeners.forEach { addCommandListener(it) } }
+            .build()
+    )
+
     /** A new client and a new, empty database. The caller closes the result. */
     fun database(): TestDatabase = TestDatabase(client(), UUID.randomUUID().toString())
+
+    /**
+     * Turns on the server's `failCommand` fail point for the [commands] of the clients named [appName], in [mode]
+     * (`"alwaysOn"`, `Document("times", n)` or `Document("skip", n)`), with the rest of its [data] (`errorCode`,
+     * `blockConnection`, `blockTimeMS`). Closing the result turns it off.
+     */
+    fun failCommand(appName: String, commands: List<String>, mode: Any, data: Document): AutoCloseable {
+        configureFailCommand(
+            mode,
+            Document("failCommands", commands).append("appName", appName).also {
+                it.putAll(data)
+            }
+        )
+        return AutoCloseable { configureFailCommand("off", Document()) }
+    }
+
+    private fun configureFailCommand(mode: Any, data: Document) {
+        client().use { admin ->
+            admin.getDatabase("admin").runCommand(
+                Document("configureFailPoint", "failCommand").append("mode", mode).append("data", data)
+            )
+        }
+    }
 
     private fun start(): Started {
         val container = MongoDBContainer(image)
