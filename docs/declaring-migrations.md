@@ -16,7 +16,8 @@ A declaration starts with one of three functions from `godwit.core`. Each return
 | `repeatable(id, revision, description = null)` | repeatable | `revision` is any non-blank string the app changes when the migration's code changes |
 | `everyStart(id, description = null)` | every-start | none beyond the id |
 
-`description` is free text, stored in history and printed in logs. It can change at any time; the id cannot.
+`description` is free text, written to the migration's history document each time the migration runs; no log line
+prints it. It can change at any time; the id cannot.
 
 ## Steps
 
@@ -94,8 +95,8 @@ The updates and the `APPLIED` record commit in the same transaction. See
 ### Pages of documents
 
 A data change too large for one transaction. godwit reads the documents that match `pending` in `_id` order, one page
-of `batchSize` (500 by default) per transaction, and commits each page's writes with a checkpoint. The shop's `007`
-uses pages of 1000:
+of `batchSize` (500 by default) per transaction, and commits each page's writes with a checkpoint; the last page, with
+fewer than `batchSize` documents, commits the `APPLIED` record instead. The shop's `007` uses pages of 1000:
 
 ```kotlin
 /**
@@ -208,8 +209,9 @@ val migrations: List<Migration> = listOf(productSlugs)
 e: Initializer type mismatch: expected 'List<Migration>', actual 'List<MigrationDraft>'.
 ```
 
-`godwit.migrate(migration("007-product-slugs"))` fails the same way: `Argument type mismatch: actual type is
-'MigrationDraft', but 'Migration' was expected.`
+`godwit.migrate(migration("007-product-slugs"))` does not compile either: neither `migrate` overload applies, and for
+the `vararg` one the compiler reports `Argument type mismatch: actual type is 'MigrationDraft', but 'Migration' was
+expected.`
 
 A migration has one transactional step. Nothing can follow `inTransaction` or `inBatches`.
 
@@ -318,7 +320,7 @@ INFO  godwit - Applied migration id=004-order-status kind=ONCE steps=[IN_TRANSAC
 |---|---|
 | The same name in both steps adds up | an outside step that counts `customersLinked` 3 and a transaction that counts it 5 report 8 |
 | A transactional step counts committed work only | when the driver runs the body again, the step's counters start again from 0 |
-| An `inBatches` step's counts survive a crash | each page commits the counts so far with its checkpoint, and a resumed run continues from them |
+| An `inBatches` step's counts survive a crash | each page commits the pages' counts so far with its checkpoint, and a resumed run continues from them; the outside step runs again on the resumed run and counts again |
 | `count(name)` on an outcome returns 0 for a name never counted | a test can assert 0 on a second run |
 
 ## Ids
@@ -344,10 +346,12 @@ two branches that took the same number; see [ordering and validation](ordering-a
 
 The examples in these docs follow one numbering. `001` to `006` and the two repeatable and every-start migrations are
 the shop's list; `007-customer-email-lower`, `008-customer-email-lower-index` and `009-order-payment-status` come next;
-every other example takes its own number from `010` on. Two kinds of example share a number on purpose: the two-branch
+every other example takes its own number from `010` on. Some examples share a number on purpose: the two-branch
 examples (`007-product-slugs`, `007-cart-currency`, `008-cart-currency`, `007-cart-totals`), which show a clash and an
-out-of-order merge, and a wrong version of a migration shown next to its fix. A page that adds a migration to the list
-shows the list at that later release, and says so (the shop's list once `009` is added, release 1.4).
+out-of-order merge; a wrong version of a migration or of its id, shown next to its fix; a renamed id or a squash that
+keeps the number it replaces (`004-order-status-backfill`, `006-baseline`); and lists that are not the shop's, a
+library's own and a second database's, which start again at `001`. A page that adds a migration to the list shows the
+list at that later release, and says so (the shop's list once `009` is added, release 1.4).
 
 ## Files and names
 
@@ -410,10 +414,10 @@ fun shopMigrations(
 
 ## Checking the list in a unit test
 
-`validateMigrations(list)` runs the same checks `migrate`, `status` and `requireUpToDate` run before any I/O, and
-throws `InvalidMigrationsException` listing every problem. It needs no database, and the services can be mocks because
-no step runs. `testConfig` and `FakeIdentityProvider` are the shop's test fixtures
-([testing](testing.md#fixtures)):
+`validateMigrations(list)` runs the checks on the list that `migrate`, `status` and `requireUpToDate` run before any
+I/O (`migrate` also checks its `Target` there), and throws `InvalidMigrationsException` listing every problem. It needs
+no database, and the services can be mocks because no step runs. `testConfig` and `FakeIdentityProvider` are the
+shop's test fixtures ([testing](testing.md#fixtures)):
 
 ```kotlin
 "the migration list is valid" {
@@ -485,6 +489,13 @@ val orderStatusBackfill = migration("004-order-status-backfill", supersedes = li
 ```
 
 See [squashing migrations](squashing-migrations.md).
+
+Rename only an id that, on every database, is `APPLIED` or has never started. Where the old id is `RUNNING` or
+`FAILED`, the new id is not recorded `SUPERSEDED` but runs, from its own first line: its history document is new and
+has no checkpoint, while the old document keeps its own and stays as it is, without a warning. Work the old id already
+committed runs again, which breaks a step that cannot repeat, such as an `inBatches` step that uses `$inc` with pages
+committed under the old id. For a migration that failed somewhere, keep the id and change its code
+([fixing forward](failure-and-recovery.md#fixing-forward)).
 
 ### A migration only some environments need
 

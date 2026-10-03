@@ -39,7 +39,11 @@ object CrashHarness {
     fun crashAfterPage(page: Int, connectionString: String, databaseName: String): CrashedChild =
         crash("godwit.core.crash.BatchesCrashMainKt", "$AFTER_PAGE$page", connectionString, databaseName)
 
-    private fun crash(mainClass: String, point: String, connectionString: String, databaseName: String): CrashedChild {
+    /**
+     * Runs the `main` of [mainClass] with the arguments `<connection string> <database> <point>` in a child JVM, and
+     * kills the child once it prints [CRASH_POINT_LINE] for [point].
+     */
+    fun crash(mainClass: String, point: String, connectionString: String, databaseName: String): CrashedChild {
         val java = ProcessHandle.current().info().command().orElseThrow()
         val process = ProcessBuilder(
             java,

@@ -33,13 +33,13 @@ the scopes, the DDL helpers, `validateMigrations`, the configuration, the result
 
 | Component | Pure or I/O | Touches | Does |
 |---|---|---|---|
-| Validation (`validateMigrations`) | pure | nothing | Checks the list: id format, duplicates (including `supersedes` ids), numeric prefixes increasing, repeatable and every-start placement, revisions, batch sizes. Public, so a unit test runs the same check |
+| Validation (`validateMigrations`) | pure | nothing | Checks the list: id format, duplicates (including `supersedes` ids), no `supersedes` list naming a declared id, numeric prefixes increasing, repeatable and every-start placement, revisions, no `inBatches` in a repeatable or every-start migration, batch sizes; `migrate` also checks its `Target`. Public, so a unit test runs the same check |
 | Planner | pure | nothing | From the list, the history documents, the target and the configuration, computes the plan: what is due, in which order, which squashes to record, the conflicts (out of order, partial supersede, unknown applied under `FAIL`), the unknown applied ids, whether a transactional step is due, whether the database is untracked. While adoption can still run, it leaves out the out-of-order and partial-supersede conflicts, which the plan made under the lock, after the hook has run, checks |
 | History store | I/O | `godwit-history` | Reads every document; writes the `RUNNING` marker, the fenced `APPLIED` record, checkpoints, `FAILED`, and the `ADOPTED`, `SUPERSEDED` and `MARKED` records |
 | Lock | I/O, one thread | `godwit-lock` | Acquires with polling, renews from a heartbeat thread, keeps the local deadline, answers `checkLock()` without I/O, releases |
 | Topology check | I/O | `hello` | Tells a replica set or `mongos` from a standalone server, only when a transactional step is due or adoption has ids to record |
-| Adoption | I/O | the app's hook, `listCollections` | Calls `GodwitConfig.adoptApplied` under the lock while every history document is `ADOPTED` (or there is none), inserts the `ADOPTED` documents history does not hold yet with upserts that only insert (one transaction on a replica set), lists collections for the untracked-database guard |
-| Runner | I/O | the app's data, through the scopes | Runs each due migration: marker, outside step, transaction or pages, `APPLIED` record, failure handling, logging, the report |
+| Adoption | I/O | the app's hook, `godwit-history` | Calls `GodwitConfig.adoptApplied` under the lock while every history document is `ADOPTED` (or there is none), inserts the `ADOPTED` documents history does not hold yet with upserts that only insert (one transaction on a replica set) |
+| Runner | I/O | the app's data, through the scopes; `listCollections` | Runs each due migration: marker, outside step, transaction or pages, `APPLIED` record, failure handling, logging, the report; lists collections for the untracked-database guard |
 | Scopes | | | `OutsideTransactionScope` and `TransactionScope`: the database, counters, `checkLock()`, and in a transaction the session and attempt number |
 | DDL helpers | I/O | the app's collections | `ensureCollection`, `ensureSearchIndex`, `dropIndexIfExists`: public extensions, and members of the outside step's scope |
 
@@ -114,7 +114,8 @@ Points that follow from it:
   deferring them never sends a start down the fast path.
 - **The untracked-database guard runs under the lock.** An empty history read before the lock could be a race with
   another process that has just started a new database's first migration; under the lock, an empty history is
-  definitive. An empty history is never the fast path (everything is due), so it always reaches the lock.
+  definitive. On an empty history every listed migration is due under `Target.Latest`, so such a call always reaches
+  the lock.
 - **The plan made before the lock only decides whether to wait.** The plan that runs is made after re-reading history
   under the lock ([locking.md](locking.md#re-reading-history-after-acquiring-a-rolling-deploy)).
 - **The transaction check runs before the lock, and again under it when needed.** Re-planning under the lock usually
@@ -183,8 +184,9 @@ run(m):
   if m is out of order (OutOfOrder.RUN): log WARN "Running out-of-order migration"
   log INFO "Running migration"
   try:
-      prepared = m.outsideStep?.invoke(OutsideTransactionScope)     no session; counters of this run
-      lock.checkLock()
+      if m has an outside step:
+          prepared = m.outsideStep(OutsideTransactionScope)        no session; counters of this run
+          lock.checkLock()
       when m.transactionalStep:
           none          -> nothing here: the APPLIED record follows the try, as godwit's own write
           inTransaction -> session.withTransaction(snapshot, majority, primary) {
@@ -278,8 +280,10 @@ run(m):
 - If the `FAILED` write itself fails, the document stays as the step left it and the `MigrationFailedException` (or
   the `LockLostException`) carries the write's exception as a suppressed exception. That is `RUNNING`, which the next
   start resumes, or `APPLIED` when a commit applied although the driver threw and the majority was still behind when
-  the `FAILED` write's own `timeoutMS` passed, which the next start finds applied. Other history and lock write
-  failures propagate as the driver's exceptions ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
+  the `FAILED` write's own `timeoutMS` passed, which the next start finds applied. When the `FAILED` write matches
+  nothing and the read that follows it fails, the read's exception propagates, with the step's error attached as
+  suppressed. Other history and lock write failures propagate as the driver's exceptions
+  ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
 - Every transaction of a transactional step opens with godwit's own command: in `inTransaction`, a read of the
   migration's history document on the session; in `inBatches`, the page's read. Each carries the comment
   `{godwit: <migration id>}`. The driver sends a transaction's first command with `startTransaction: true`, so that
@@ -314,8 +318,8 @@ stateDiagram-v2
     RUNNING --> FAILED: a step throws, FAILED written
     RUNNING --> RUNNING: crash or lost lock, then the next run's marker
     FAILED --> RUNNING: the next run's marker
-    RUNNING --> APPLIED: markApplied
-    FAILED --> APPLIED: markApplied
+    RUNNING --> APPLIED: markApplied, or a squash recorded
+    FAILED --> APPLIED: markApplied, or a squash recorded
     APPLIED --> RUNNING: repeatable with a new revision, or every-start
     APPLIED --> [*]: once-only, final
 ```
@@ -329,8 +333,8 @@ stateDiagram-v2
 | `RUNNING` | A step throws (also when the lock is lost at the same moment) | `FAILED` | after the step, outside any transaction | `owner` = this run, `state` = `RUNNING`; matching nothing means a commit applied (`APPLIED` by this run) or another run took over |
 | `RUNNING` | Process dies, lock lost | `RUNNING` (unchanged) | nobody | |
 | `RUNNING` or `FAILED` | The next run starts | `RUNNING`, `attempts` + 1 | marker upsert | Once-only: `state != APPLIED` |
-| `RUNNING` or `FAILED`, once-only | `markApplied` | `APPLIED` (`MARKED`) | conditional update, under the lock | `state != APPLIED` |
-| `APPLIED`, repeatable | Revision differs | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
+| `RUNNING` or `FAILED`, once-only | `markApplied`, or a squash whose replaced ids are all `APPLIED` (an earlier run of the squash failed or was interrupted) | `APPLIED` (`MARKED`, `SUPERSEDED`) | conditional upsert, under the lock | `state != APPLIED` |
+| `APPLIED`, repeatable | Revision differs, or a run of another kind applied it | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
 | `APPLIED`, every-start | Every `Target.Latest` start | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
 | `APPLIED`, once-only | anything | `APPLIED` | nobody: every write is conditional on `state != APPLIED` | |
 
@@ -484,7 +488,8 @@ db.getCollection("godwit-history").findOneAndUpdate(
       owner: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f", holder: "shop-7f9c4/1",
       runId: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f", startedAt: new Date(), godwitVersion: "0.1.0", v: 1
     },
-    $inc: { attempts: 1 }
+    $inc: { attempts: 1 },
+    $unset: { description: "" }                     // 004 declares no description
   },
   { upsert: true, returnDocument: "after", writeConcern: { w: "majority" } }
 )
@@ -506,7 +511,8 @@ db.getCollection("godwit-history").findOneAndUpdate(
         attempts: { $cond: [{ $eq: ["$state", "APPLIED"] }, 1, { $add: [{ $ifNull: ["$attempts", 0] }, 1] }] },
         owner: { $literal: "5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f" }, holder: { $literal: "shop-7f9c4/1" },
         runId: { $literal: "0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f" }, startedAt: new Date(),
-        godwitVersion: "0.1.0", v: 1
+        godwitVersion: "0.1.0", v: 1,
+        description: "$$REMOVE"                     // reference-countries declares no description
       }
     }
   ],
@@ -747,9 +753,10 @@ quotes a guidance line quotes it from this table, and the `MigrationFailedExcept
 | Marker, `FAILED`, outside-only `APPLIED`, adoption, squash and `markApplied` records | | majority | primary | the client's |
 | Lock acquire, renew, release, holder read | majority | majority | primary | 5 s per operation, client side |
 | A transactional step's transaction (body, checkpoint, `APPLIED` record) | snapshot | majority | primary | the server's transaction lifetime (60 s by default); the driver's 120 s retry window |
-| The other-type check before an `inBatches` step's last page | majority | | primary | the client's |
+| The other-type check before an `inBatches` step's last page | majority | | the client's | the client's |
 | An outside step's operations | the client's | the client's | the client's | the client's |
 | `hello` (topology check) | | | primary | the client's |
+| `listCollections` (untracked-database guard) | | | primary: the driver lists collections there whatever the client's read preference | the client's |
 
 - **Majority for bookkeeping.** A lock acquired with `w:1` could be rolled back by a failover, leaving two holders; a
   history read below majority could see an `APPLIED` record that is later rolled back. The read that settles a history
@@ -761,7 +768,10 @@ quotes a guidance line quotes it from this table, and the `MigrationFailedExcept
   past the lease. With the timeout, the failure surfaces and the local deadline decides.
 - **Outside steps use the app's settings.** godwit does not override the read preference or write concern of the app's
   client for the app's own collections. An app whose client reads from secondaries reads from secondaries in its outside
-  steps.
+  steps. An app whose client writes with `w:1` writes with `w:1` there too, and a failover can then roll back an outside
+  step's writes after godwit has recorded the migration APPLIED with majority, so the step never runs again: an outside
+  step whose writes must survive a failover uses majority write concern
+  ([outside-transaction steps](outside-transaction-steps.md#an-outside-step)).
 - **Codecs.** godwit's collections use the driver's default codec registry, whatever registry the app's client has.
   The scopes' `database` and `collection(...)` carry the app's client settings, codecs included.
 
@@ -788,14 +798,15 @@ runs on a standalone server; it sends `hello` only when adoption has ids to reco
 
 | Requirement | Why |
 |---|---|
-| MongoDB 4.4 or later | godwit's own operations need 4.4: they carry a `comment`, which `update` and `findAndModify` accept from 4.4, and they use `$$NOW` and pipeline updates for the lock and the repeatable marker, and transactions on sharded clusters, from 4.2. 4.4 also lets a transactional step create a collection by inserting into it, which `reference-countries` does on a new database |
+| MongoDB 4.4.2 or later | godwit's own operations need 4.4: they carry a `comment`, which `update` and `findAndModify` accept from 4.4, and they use `$$NOW` and pipeline updates for the lock and the repeatable marker, and transactions on sharded clusters, from 4.2. 4.4 also lets a transactional step create a collection by inserting into it, which `reference-countries` does on a new database. The topology check sends `hello`, which the server answers from 4.4.2 |
 | A replica set or a sharded cluster, for transactional steps | Transactions do not exist on a standalone server. A single-node replica set is enough |
 | Atlas, or the Atlas local image, for `ensureSearchIndex` | Search index commands exist only where Atlas Search runs |
 | `org.mongodb:mongodb-driver-kotlin-sync` 5.7.0 | godwit's API is in terms of the Kotlin sync driver's types (`MongoCluster`, `ClientSession`, `MongoDatabase`) |
 
-godwit's integration tests run against one current server release, in the container godwit-test starts. On a sharded
-cluster, a transaction that writes to more than one shard cannot create a collection; create collections in an outside
-step first, as the shop's `001-initial-setup` does.
+godwit's integration tests run against one current server release, the image godwit-test starts, with a newer release
+for the DDL helpers' behaviour that changes by version and the Atlas local image for search indexes. They do not run
+against a sharded cluster or a release before 8.0. On a sharded cluster, a transaction that writes to more than one
+shard cannot create a collection; create collections in an outside step first, as the shop's `001-initial-setup` does.
 
 godwit supports MongoDB itself. Servers from other vendors that speak the MongoDB wire protocol are not supported:
 each one lacks at least one of the server features godwit's guarantees rest on.
@@ -859,8 +870,9 @@ Both names are configurable (`GodwitConfig.historyCollection`, `GodwitConfig.loc
 ## Threads and state
 
 - `migrate`, `status`, `history` and `markApplied` are synchronous and run on the caller's thread, including every step.
-- Each run that takes the lock starts one daemon heartbeat thread and stops it when the run ends. The heartbeat never
-  touches the step's `ClientSession`, which is not thread-safe; it issues its own operations on the lock collection.
+- Each run that takes the lock starts one daemon heartbeat thread, named `godwit-heartbeat-<runId>`, and stops it when
+  the run ends. The heartbeat never touches the step's `ClientSession`, which is not thread-safe; it issues its own
+  operations on the lock collection.
 - A `Godwit` instance holds only its constructor arguments. Every call reads history again; two calls on one instance,
   from two threads, are two runs with two owner tokens, serialised by the lock like two processes.
 - godwit installs no JVM shutdown hook. A process that exits mid-run is a crash, which the lease and the history
@@ -916,6 +928,12 @@ The shop configures its `MongoClient` with `readPreference=secondaryPreferred` a
 history and lock operations still use primary reads and majority writes (set on godwit's collection handles), and
 transactions use primary and majority. The shop's outside steps inherit `secondaryPreferred`: an outside step that reads
 what it just wrote could miss it. Read with `collection(...).withReadPreference(ReadPreference.primary())` in such a step.
+The other-type check before an `inBatches` step's last page inherits it too; it reads with majority read concern on the
+run's causally consistent session, so a secondary answers it only once it has the pages the run committed. The
+untracked-database guard's `listCollections` does not: the driver sends it to the primary whatever the client's read
+preference. The outside steps inherit `w=1` as well: a write the primary acknowledged and lost in a failover before
+replicating it is rolled back, while the APPLIED record that follows, written with majority to the new primary, stays,
+so the step never runs again to redo it. Write with `withWriteConcern(WriteConcern.MAJORITY)` in such a step.
 
 **A client-side operation timeout on the app's client.**
 The app's client sets `timeoutMS=5000`. The driver then bounds each `withTransaction` by that timeout instead of its

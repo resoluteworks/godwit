@@ -51,7 +51,7 @@ private fun totalOf(order: Document): Long =
 | `collection` | The collection to page through, by name |
 | `pending` | A filter that selects the documents still to change. Re-evaluated on every page. |
 | `batchSize` | The most documents in one page: 1 to 10000, 500 by default |
-| `step` | Receives one page as `List<Document>`, with `TransactionScope` as its receiver: `session`, `attempt`, `count`, `checkLock`, `collection`, `database` |
+| `step` | Receives one page as `List<Document>`, decoded with the codec registry of the client passed to `Godwit`, with `TransactionScope` as its receiver: `id`, `session`, `attempt`, `count`, `checkLock`, `collection`, `database` |
 
 What godwit does when it runs it:
 
@@ -63,15 +63,16 @@ What godwit does when it runs it:
       checkpoint, sorted by `_id` (the first page has no checkpoint), and checks that their `_id`s have one type
       ([Edge cases](#_ids-of-more-than-one-bson-type));
    3. when it read fewer than `batchSize`, this is the last page, and godwit first checks that no document matching
-      `pending` has an `_id` of another type. That check runs outside any transaction: the page's transaction commits
-      here without calling the step, the check runs, and the page runs again from 1 in a new transaction, which skips
-      this item;
+      `pending` has an `_id` of another type (a first page that finds nothing has no type to compare). That check runs
+      outside any transaction: the page's transaction commits here without calling the step, the check runs, and the
+      page runs again from 1 in a new transaction, which skips this item;
    4. when it found any, calls the step with them;
-   5. calls `checkLock()`;
+   5. calls `checkLock()` and checks that the session still runs the page's transaction
+      ([transactions and sessions](transactions-and-sessions.md#a-service-starts-its-own-transaction));
    6. when the page held `batchSize` documents, writes the checkpoint to the history document, fenced on this run's
       lock token: `lastId` (the page's last `_id`), the page count and the counters so far; on the last page, records
       the migration APPLIED instead, which removes the checkpoint;
-   7. commits.
+   7. commits, and logs "Committed batch" (DEBUG) with the page count and `lastId` when the page held documents.
 
 With 1,203 orders to total, the pages hold 500, 500 and 203 orders, and the third commits APPLIED. With exactly 1,000,
 two full pages are followed by a read that finds nothing; it commits APPLIED without calling the step, and `batches` is
@@ -121,14 +122,15 @@ index exists, so `createIndex` returns at once) and continues after `lastId`. Pa
 ```text
 WARN  godwit - Resuming interrupted migration id=006-order-totals attempts=2
 INFO  godwit - Running migration id=006-order-totals kind=ONCE steps=[OUTSIDE_TRANSACTION, IN_BATCHES] attempt=2
-DEBUG godwit - Committed batch id=006-order-totals batch=38 lastId=66f1c3e2a8b4d10f2e7c9c2b
+DEBUG godwit - Committed batch id=006-order-totals batch=38 lastId=66f1c3e2a8b4d10f2e7c9c34
 INFO  godwit - Applied migration id=006-order-totals kind=ONCE steps=[OUTSIDE_TRANSACTION, IN_BATCHES] attempts=2 txRetries=0 batches=241 durationMs=48211 ordersUpdated=120318
 ```
 
-`batches` and the counters cover every attempt: the checkpoint carries them across the restart, so `ordersUpdated` is
-the number of orders totalled overall, not just by the second process. A deploy that stops the process between pages
-has the same effect as the crash. A failure in a page does too, with the history document FAILED instead of RUNNING
-([Edge cases](#a-page-fails)).
+`batches` and the page step's counters cover every attempt: the checkpoint carries them across the restart, so
+`ordersUpdated` is the number of orders totalled overall, not just by the second process. Counters of the outside step
+are not in the checkpoint: the outside step runs again on every attempt, and only its last run counts. A deploy that
+stops the process between pages has the same effect as the crash. A failure in a page does too, with the history
+document FAILED instead of RUNNING ([Edge cases](#a-page-fails)).
 
 ## Choosing `batchSize`
 
@@ -404,9 +406,10 @@ You: let the process restart. See [locking](locking.md).
 
 godwit: each page's query asks for documents matching `pending` above the checkpoint in `_id` order, inside the page's
 transaction. Without an index that serves `pending`, the server walks the `_id` index through the non-matching orders
-to fill a page. A page whose read takes longer than the transaction lifetime (60 s) never commits: the server aborts
-it, the driver retries it until its 120 s window ends, and the migration fails without a checkpoint, the same way on
-every start. `Slow transaction` lines for the migration's first page are the warning sign.
+to fill a page. A page whose read takes longer than the transaction lifetime (60 s) never commits: the server
+interrupts the read with `TransactionExceededLifetimeLimitSeconds` (290), which the driver does not retry, and the
+migration fails without a checkpoint, the same way on every start. The failure's message says the page's transaction ran past its lifetime and suggests a lower `batchSize`
+or an index that serves `pending`. `Slow transaction` lines for the migration's first page are the warning sign.
 
 You: in the outside step, create an index whose prefix serves `pending` and that continues with `_id`, such as
 `{totalMinor: 1, _id: 1}` for `exists("totalMinor", false)`, so each page reads only matching documents; or, when the
@@ -515,6 +518,9 @@ Chosen: each page's writes and its checkpoint commit together.
 Considered: non-transactional pages with a checkpoint written after each. A crash between the page's writes and the
 checkpoint repeats the page, so the page work would have to be safe to repeat. With the checkpoint inside the
 transaction, each page commits exactly once, and a page may use `$inc` or deletes as freely as an `inTransaction` step.
+The checkpoint belongs to the migration's id: a migration declared under a new id that supersedes this one starts from
+the first page, so such a step keeps its id until it has applied
+([declaring migrations](declaring-migrations.md#an-applied-id-is-renamed)).
 
 ### No `inBatches` in repeatables
 

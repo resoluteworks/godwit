@@ -92,8 +92,8 @@ class MidHistorySpec : StringSpec({
             )
         )
 
-        val outcome = db.godwit.migrate(migrations, target = Target.Through("005-customer-external-ids"))
-            .get("005-customer-external-ids")
+        val report = db.godwit.migrate(migrations, target = Target.Through("005-customer-external-ids"))
+        val outcome = report["005-customer-external-ids"]
 
         outcome.count("customersLinked") shouldBe 1L
         CustomerService(db.database).findByEmail("ann@example.com")?.externalUserId shouldBe "user-ann@example.com"

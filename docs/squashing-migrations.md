@@ -90,7 +90,7 @@ baseline itself has no `APPLIED` history document:
 | A new developer database | 0 of 6 | runs the baseline's steps | `APPLIED`, origin `RAN` |
 | Staging, stuck at `004` | 4 of 6 | throws `PlanConflictException`, nothing runs or is recorded | no document |
 
-A database where every replaced id is applied logs one line per recorded baseline, and runs the rest of the list as usual:
+A database where every replaced id is applied records the baseline under the lock, before any migration of the list runs, and logs one line per recorded baseline. `MigrationReport.recorded` lists it with origin `SUPERSEDED`, no steps and 0 attempts. The rest of the list runs as usual:
 
 ```text
 INFO  godwit - Recorded superseded migration id=100-baseline supersedes=[001-initial-setup, 002-carts, 003-file-store, 004-order-status, 005-customer-external-ids, 006-order-totals]
@@ -150,9 +150,9 @@ The six old migrations stay in history as `APPLIED` documents on a migrated data
 - **Delete the replaced migrations in the same commit.** A `supersedes` list must not name an id that the list still declares. `validateMigrations` rejects the list and `migrate` throws `InvalidMigrationsException`.
 - **Ids stay unique, counting `supersedes` lists.** The baseline's id cannot equal a replaced id, and two migrations cannot replace the same id.
 - **The numbering stays increasing.** Among once-only migrations, numeric prefixes strictly increase in list order. A baseline that replaces the whole history takes a number above the old ones (`100-baseline`), and later migrations continue from it (`101-...`). A baseline that replaces only the first part of the history must sort below the migrations that stay: give it the number of the last migration it replaces (`006-baseline` before `007-customer-email-lower`).
-- **A rename is a squash of one.** An id never changes, but `migration("004-order-status-backfill", supersedes = listOf("004-order-status"))` replaces `004-order-status` under a new id with the same rules. See [declaring-migrations.md](declaring-migrations.md).
+- **A rename is a squash of one.** An id never changes, but `migration("004-order-status-backfill", supersedes = listOf("004-order-status"))` replaces `004-order-status` under a new id with the same rules. Rename only an id that is `APPLIED` or never started on every database: where it is `RUNNING` or `FAILED`, the new id runs from its own first line, without the old id's checkpoint, and repeats the work the old id committed. See [declaring-migrations.md](declaring-migrations.md#an-applied-id-is-renamed).
 - **List it before the migrations that depend on it.** It is a once-only migration; list position is run order.
-- **Recording is not running.** When godwit records a baseline as `SUPERSEDED`, the out-of-order policy does not apply, even if migrations listed after it are already applied. That is what lets a partial squash start on production, where `007` is applied.
+- **Recording is not running.** When godwit records a baseline as `SUPERSEDED`, the out-of-order policy does not apply, even if migrations listed after it are already applied. That is what lets a squash of the first part of the history start on production, where `007` is applied.
 - **The replaced ids keep their place.** Until the baseline is `APPLIED`, each applied id it replaces counts, for a once-only migration listed before the baseline, as listed in the baseline's place. A migration pending before it is out of order, as it would be before the old migrations, so a squash or a rename does not hide a gap ([ordering-and-validation.md](ordering-and-validation.md#out-of-order)).
 - **An applied baseline is settled.** The all, none or some decision is made only while the baseline has no `APPLIED` history document. Once it is `APPLIED` (recorded or run), its stored `supersedes` list only keeps the old ids known; how many of them are applied no longer matters. A database built by the baseline that later ran some of the old migrations under an older release (see "A rollback onto a new database") rolls forward again without a conflict.
 - **A baseline is an ordinary migration.** It can have an outside step, a transactional step, or both. A baseline that godwit runs follows every rule of [declaring-migrations.md](declaring-migrations.md), and its outside step must be idempotent.
@@ -207,7 +207,7 @@ db.getCollection("godwit-history").countDocuments({
 })
 ```
 
-The answer must be `6`. You can also run `godwit.status(squashedMigrations(...))` with release N's list: an environment that is not ready reports the partial squash in `problems`. `notYetApplied` is the gate, though: `status()` does not report a partial squash while history holds only `ADOPTED` documents and the adoption hook is configured.
+The answer must be `6`. You can also run `godwit.status(squashedMigrations(...))` with release N's list: an environment that is not ready reports the partial squash in `problems`. `notYetApplied` is the gate, though: `status()` does not report a partial squash while history holds only `ADOPTED` documents and the adoption hook is configured. On a ready environment `status()` does not list the baseline as pending either, because recording it changes no data, so `requireUpToDate` passes before the first start of release N has recorded it.
 
 **Gate 2, before deleting `supersedes` from code: has this database recorded the baseline?** `hasRecordedBaseline(godwit, "100-baseline")` is true when `100-baseline` is `APPLIED` and carries its stored list. See "When to remove `supersedes`".
 
@@ -234,7 +234,7 @@ The baseline fails only where it runs: on a database where none of the replaced 
 
 - It is recorded `FAILED` with `lastError`, and `migrate` throws `MigrationFailedException`.
 - The next start runs its outside step again from the beginning, so every call in it must be idempotent. The baseline above uses `ensureCollection`, `createIndexes` with fixed specs and `ensureSearchIndex`, all of which converge.
-- Where it does not run (a migrated database), recording it is a history write. If the write fails the driver's exception propagates, nothing is recorded, and the next start records it.
+- Where it does not run (a migrated database), recording it is a history write, under the lock, before any migration of the list runs. If the write fails, the driver's exception propagates and nothing after it runs. The next start records the baseline, or finds it recorded when the write applied although the driver threw.
 - A failed baseline stays due. If the replaced ids are applied before it runs again (a rollback to the previous release applies them), the next start records it instead of running it, and the record removes its `lastError` and `checkpoint` ([edge case](#the-baseline-failed-then-a-rollback-applied-the-six)).
 
 Example: a new database, and `ensureSearchIndex(..., awaitReady = 5.minutes)` throws `SearchIndexNotReadyException` after the baseline created its collections and indexes. History holds `100-baseline` as `FAILED`. The next start runs the outside step again: `ensureCollection` returns false for the existing collections, `createIndexes` finds identical indexes, and `ensureSearchIndex` finds the index and waits for it again.
@@ -480,7 +480,7 @@ fun markBaselineByHand(godwit: Godwit) {
 
 **Alternative:** apply the policy to the baseline's position.
 
-**Why:** a baseline is listed before the migrations that stay, which production has already applied. Under `OutOfOrder.FAIL` every partial squash would refuse to start on production, the one place it must work.
+**Why:** a baseline is listed before the migrations that stay, which production has already applied. Under `OutOfOrder.FAIL` every squash of the first part of the history would refuse to start on production, the one place it must work.
 
 ## See also
 

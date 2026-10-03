@@ -75,16 +75,15 @@ services use, because the session godwit opens for a transactional step is valid
 ```kotlin
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
 
-        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
+    Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 ```
 
@@ -101,7 +100,7 @@ written.
 | Kind | Declared with | Due when | History | Shop example |
 |---|---|---|---|---|
 | once-only | `migration(id)` | its history document is missing or not `APPLIED` | `kind: "ONCE"`; `APPLIED` is final | `004-order-status` |
-| repeatable | `repeatable(id, revision)` | as once-only, or the stored `revision` differs from the declared one | `kind: "REPEATABLE"`, `revision`, `runCount`, `lastRunAt` | `reference-countries` |
+| repeatable | `repeatable(id, revision)` | as once-only, or the stored `revision` differs from the declared one, or a run of another kind wrote the document | `kind: "REPEATABLE"`, `revision`, `runCount`, `lastRunAt` | `reference-countries` |
 | every-start | `everyStart(id)` | on every `migrate` with `Target.Latest` | `kind: "EVERY_START"`, `runCount`, `lastRunAt` | `bootstrap-customers` |
 
 Repeatable and every-start migrations are listed after every once-only migration (`validateMigrations` rejects any
@@ -118,9 +117,9 @@ correct.
 
 | Step | Declared with | Session | How often the code runs | What commits, and when |
 |---|---|---|---|---|
-| outside step | `outsideTransaction { }` | none | at least once: a retry runs it again from the start | each write on its own, as it happens |
+| outside step | `outsideTransaction { }` | none | at least once: a retry runs it again from the start | each write on its own, as it happens, with your client's write concern (majority, for writes a failover must not roll back) |
 | transactional step | `inTransaction { }` | `session` | once, or more when the driver retries the transaction | the step's writes and the `APPLIED` history record, in one transaction: exactly once |
-| transactional step, paged | `inBatches(collection, pending, batchSize) { docs -> }` | `session` | once per page, or more when the driver retries that page | each page's writes with the page's checkpoint: each page exactly once; the last page also commits `APPLIED` |
+| transactional step, paged | `inBatches(collection, pending, batchSize) { docs -> }` | `session` | once per page, or more when the driver retries that page | each page's writes with the page's checkpoint: each page exactly once; the last page (fewer than `batchSize` documents) commits the `APPLIED` record instead of a checkpoint |
 
 The five valid shapes:
 
@@ -179,13 +178,14 @@ migrate(list)
   check the list (pure) ................................ InvalidMigrationsException
   read history: one query, majority read concern
   check the plan against history ....................... PlanConflictException
-  nothing due? ......................................... return: the fast path, no lock, no writes
+  nothing to run or record? ............................ return: the fast path, no lock, no writes
   a transactional step due on a standalone server? ..... TransactionsUnsupportedException
   take the lock, waiting up to 10 min .................. LockTimeoutException
     read history again
-    adopt applied ids (while history holds only adopted documents; only what is missing)
-    plan and check again ............................... PlanConflictException, UntrackedDatabaseException
+    adopt applied ids (hook set and history holds only adopted documents; only what is missing)
+    plan and check again ............................... PlanConflictException
     a new transactional step due on a standalone server? TransactionsUnsupportedException
+    collections, no history, nothing adopted? .......... UntrackedDatabaseException
     record superseded squashes
     run every due once-only migration, in list order
     run every due repeatable and every-start migration, in list order
@@ -203,19 +203,21 @@ migrate(list)
    the fast path, so they also stop a start that has nothing to do. While the adoption hook can still run, the
    out-of-order and squash checks wait for it (step 7). See
    [ordering and validation](ordering-and-validation.md), [squashing migrations](squashing-migrations.md).
-4. **The fast path.** When nothing is due, `migrate` logs `Migrations up to date` and returns without taking the lock.
-   `report.lockWait` is null.
+4. **The fast path.** When nothing is due and no squash is waiting to be recorded, `migrate` logs
+   `Migrations up to date` and returns without taking the lock. `report.lockWait` is null.
 5. **Check the server.** Only when a transactional step is due: a standalone `mongod` has no transactions.
 6. **Take the lock.** One document in `godwit-lock`, leased on server time and renewed by a heartbeat. A second process
    waits, logs the holder every 10 s, and gives up after `LockConfig.waitTimeout`. See [locking](locking.md).
 7. **Plan again under the lock.** Another process may have done the work while this one waited, so godwit reads
-   history again before it runs anything. While history holds nothing but `ADOPTED` documents (or nothing at all),
-   this is where the adoption hook runs and records the ids history lacks, where the out-of-order and squash checks
-   that waited for it run, and where a database with collections but no history is refused unless something was
-   adopted. See [adopting an existing database](adopting-an-existing-database.md).
-8. **Run.** For each due migration: mark it `RUNNING` (`attempts` + 1, or 1 for a repeatable or every-start migration
-   whose last run applied), run the outside step, run the transactional step with the `APPLIED` flip inside its
-   transaction (an outside-only migration writes `APPLIED` after its step).
+   history again before it runs anything. While the adoption hook is configured and history holds nothing but
+   `ADOPTED` documents (or nothing at all), this is where the hook runs and records the ids history lacks, and where
+   the out-of-order and squash checks that waited for it run. The new plan is checked in this order: plan conflicts,
+   then the server again when it has a transactional step due that the first plan did not, then the untracked-database
+   guard, which by default refuses a database with collections but no history when nothing was adopted. See
+   [adopting an existing database](adopting-an-existing-database.md).
+8. **Run.** Record the superseded squashes, then, for each due migration: mark it `RUNNING` (`attempts` + 1, or 1 for
+   a repeatable or every-start migration whose last run applied), run the outside step, run the transactional step
+   with the `APPLIED` flip inside its transaction (an outside-only migration writes `APPLIED` after its step).
    The first failure records the migration `FAILED` with its error, stops the run and throws
    `MigrationFailedException`. See [failure and recovery](failure-and-recovery.md).
 9. **Release the lock** and return the report.
@@ -313,9 +315,9 @@ runs only `bootstrap-customers`, which is due on every start. What you do: nothi
 ### The process is killed in the middle of a migration
 
 State: the instance running `006-order-totals` is killed after committing page 40. History holds `006-order-totals`
-as `RUNNING` with `checkpoint: {lastId: <last _id of page 40>, batches: 40}`, and the lock document still names the
-killed process until its lease expires (60 s at most). The next start waits for the lease to expire, takes the lock and
-resumes:
+as `RUNNING` with `checkpoint: {lastId: <last _id of page 40>, batches: 40, counts: {ordersUpdated: 20000}}`, and the
+lock document still names the killed process until its lease expires (60 s at most). The next start waits for the
+lease to expire, takes the lock and resumes:
 
 ```text
 WARN  godwit - Resuming interrupted migration id=006-order-totals attempts=2
@@ -390,7 +392,8 @@ The shop's own code appears in the examples next to godwit's API. None of it is 
 | Name | Package | What it is |
 |---|---|---|
 | `ShopConfig`, `MongoSettings`, `IdentitySettings`, `BootstrapSettings`, `SeedCustomer`, `loadShopConfig()` | `com.example.shop` | The shop's configuration, read from environment variables. `config.mongo.searchIndexWait` is a `Duration?`, `config.bootstrap.customers` a `List<SeedCustomer>` |
-| `startHttpServer(customers, orders)`, `log` | `com.example.shop` | The rest of the app, and its slf4j logger |
+| `startHttpServer(customers, orders)`, `connectPaymentGateway()`, `processPaidOrders(orders)` | `com.example.shop` | The rest of the app: its HTTP server, its sign-in to the payment gateway's client library (slow, and it throws while the gateway is down), and the background worker's loop |
+| `log` | the file that uses it | The shop's slf4j logger, `LoggerFactory.getLogger("shop")` |
 | `CustomerService(database)`, `OrderService(database)` | `com.example.shop.services` | The shop's services. Every method that writes takes a `ClientSession` first: `setExternalUserId(session, customerId, externalUserId)`, `ensureCustomer(session, seed, externalUserId)`, `markPaid(session, orderId, paymentId, paidAt)`. Reads such as `findByEmail(email)` and `withoutExternalUserId()` take none |
 | `IdentityProvider`, `ExternalUser`, `HttpIdentityProvider(baseUrl, apiKey)` | `com.example.shop.services` | An external identity provider over HTTP: `findOrCreateUser(email): ExternalUser`, idempotent by email |
 | `PaymentGateway`, `PaymentStatus` | `com.example.shop.services` | An external payment gateway: `paymentStatus(paymentId): PaymentStatus`, read-only |
@@ -424,15 +427,15 @@ Every decision, with its reasoning, is indexed in [design decisions](design-deci
 | outside step | the `outsideTransaction { }` step: no session, at least once, idempotent |
 | transactional step | the `inTransaction { }` or `inBatches(...) { }` step: commits with the history record |
 | prepared value | what the outside step returns, the parameter of the `inTransaction` lambda |
-| checkpoint | the last `_id`, page count and counts an `inBatches` step committed with its last page |
+| checkpoint | the last `_id`, the number of pages and the pages' counters, which an `inBatches` step commits with each page but the last |
 | counter | a named number a step adds to with `count(name, n)`; stored in history, logged, reported |
 | due | needs to run on this database now: missing or not `APPLIED`, a changed revision, or every-start |
-| pending | due, as `status()` reports it; never includes every-start migrations |
+| pending | due, as `status()` reports it; never includes every-start migrations. `MigrationReport.pending` is narrower: the once-only ids a `Target` stopped before |
 | history | the `godwit-history` collection, one document per migration, `_id` = migration id |
 | origin | how a history document became `APPLIED`: `RAN`, `ADOPTED`, `SUPERSEDED` or `MARKED` |
 | lock | the `godwit-lock` document; one holder at a time, leased, renewed by a heartbeat |
 | holder | `GodwitConfig.holder`, `<hostname>/<pid>` by default |
-| fast path | nothing due: one history read, no lock |
+| fast path | nothing due and no squash to record: one history read, no lock |
 | out of order | a pending once-only migration listed before an applied once-only migration, counting the applied ids a later squash not yet applied names in its place |
 | unknown applied | an `APPLIED` history id that the list does not know |
 | adoption | adopting a database migrated by another tool, or by hand, through `GodwitConfig.adoptApplied` |

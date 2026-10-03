@@ -20,19 +20,18 @@ private val log = LoggerFactory.getLogger("shop")
  */
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
 
-        try {
-            Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
-        } catch (e: MigrationFailedException) {
-            log.error("Migration {} failed in {}; this start ran {} first", e.id, e.step, e.report.ran.map { it.id }, e)
-            exitProcess(1)
-        }
-
-        startHttpServer(customers, orders)
+    try {
+        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
+    } catch (e: MigrationFailedException) {
+        log.error("Migration {} failed in {}; this start ran {} first", e.id, e.step, e.report.ran.map { it.id }, e)
+        exitProcess(1)
     }
+
+    startHttpServer(customers, orders)
 }

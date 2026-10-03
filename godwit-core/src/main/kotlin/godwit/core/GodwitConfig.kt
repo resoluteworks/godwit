@@ -124,8 +124,9 @@ enum class OutOfOrder {
 }
 
 /**
- * The policy for an APPLIED history id that the list does not know. An id is known when the list declares it or when
- * a superseding migration recorded in history names it in its stored `supersedes` list.
+ * The policy for an APPLIED history id that the list does not know. An id is known when the list declares it, when a
+ * `supersedes` list in the list names it, or when a superseding migration recorded in history names it in its stored
+ * `supersedes` list.
  */
 enum class UnknownApplied {
     /**

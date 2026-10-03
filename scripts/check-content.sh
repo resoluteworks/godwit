@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Content rules for every .kt, .kts, .md and .sh file under a directory (default: the repository that holds this script,
-# so README.md, docs/**, docs-snippets/** and scripts/**): no em dash, en dash only inside a numeric range, no history
-# narrative, no banned phrases, and (in README.md and docs/**, outside docs/development) none of
+# Content rules for every .kt, .kts, .md and .sh file under a directory (default: the whole repository that holds this
+# script), skipping build, .gradle, .kotlin, gradle and .git directories: no em dash, en dash only inside a numeric
+# range, no history narrative, no banned phrases, and (in README.md and docs/**, outside docs/development) none of
 # the docs build's own packages or comments.
 # Usage: scripts/check-content.sh [dir]. Exits 0 when every rule holds.
 set -euo pipefail

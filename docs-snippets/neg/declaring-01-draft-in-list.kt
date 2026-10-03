@@ -1,4 +1,4 @@
-// expect: actual 'List<MigrationDraft>'
+// expect: Initializer type mismatch: expected 'List<Migration>', actual 'List<MigrationDraft>'.
 // docs/declaring-migrations.md: a draft without a step is not a Migration.
 package neg
 

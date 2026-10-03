@@ -39,7 +39,8 @@ with the state before and after, what the next start does, and what you do.
 
 A failed migration must stop the start: the code that follows expects the schema the migration was about to produce.
 Letting the exception propagate out of `main` does that. The shop logs what happened first, then exits non-zero so the
-orchestrator restarts the process, and the restart retries the migration:
+orchestrator restarts the process, and the restart retries the migration. Alert on that exit and on a restart loop:
+several failures throw without a godwit log line ([what to alert on](configuration.md#what-to-alert-on)).
 
 ```kotlin
 /**
@@ -48,21 +49,20 @@ orchestrator restarts the process, and the restart retries the migration:
  */
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
 
-        try {
-            Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
-        } catch (e: MigrationFailedException) {
-            log.error("Migration {} failed in {}; this start ran {} first", e.id, e.step, e.report.ran.map { it.id }, e)
-            exitProcess(1)
-        }
-
-        startHttpServer(customers, orders)
+    try {
+        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
+    } catch (e: MigrationFailedException) {
+        log.error("Migration {} failed in {}; this start ran {} first", e.id, e.step, e.report.ran.map { it.id }, e)
+        exitProcess(1)
     }
+
+    startHttpServer(customers, orders)
 }
 ```
 
@@ -93,19 +93,21 @@ What the stance means in practice:
 | Outside step throws | `FAILED`, `lastError` (step `OUTSIDE_TRANSACTION`); the step's own writes stay | `MigrationFailedException`; later migrations do not run; lock released | Runs the outside step again from the start |
 | Process killed mid outside step | `RUNNING`; partial DDL stays | (process gone) | After the lease ends: `WARN Resuming interrupted migration`, outside step again |
 | Process killed mid transaction | `RUNNING`; the server aborts the open transaction within 60 s, nothing of it stays | (process gone) | As above; the transaction runs from scratch |
-| Transaction body throws | The step's writes and the `APPLIED` record roll back; `FAILED` and `lastError` written after the abort | `MigrationFailedException` | Outside step again, then the transaction |
+| Transaction body throws | The step's writes roll back (the `APPLIED` record, which follows the body, is never written); `FAILED` and `lastError` written after the abort | `MigrationFailedException` | Outside step again, then the transaction |
 | Transient error (`WriteConflict`, election) | `transactionRetries` counts it once the migration applies | The driver re-runs the body, counters reset, `WARN Retrying transaction`, for up to 120 s | Nothing to retry |
 | Commit result unknown (network blip at commit) | `APPLIED` if the commit applied, else as for a body that throws | The driver retries the commit only. When it gives up although the commit applied while the lock is still held (a client-side timeout), godwit reads the document, finds it `APPLIED` by this run and reports the migration as applied. When its retries run out of the 120 s window, the lock's deadline has normally passed too: `LockLostException`, with the commit's error as its cause | Nothing to retry, or the migration again |
-| Transaction past the 60 s lifetime | `FAILED`, guidance in the message | The driver retries until its 120 s window ends, then `MigrationFailedException` | Fails the same way until the code changes |
+| Transaction past the 60 s lifetime | `FAILED`, guidance in the message | An operation still running at the limit fails with `TransactionExceededLifetimeLimitSeconds` (290), which the driver does not retry; a limit between two operations gives `NoSuchTransaction` (251), which the driver retries until its 120 s window ends. Then `MigrationFailedException` | Fails the same way until the code changes |
 | Transaction too large (`TransactionTooLargeForCache`, 388) | `FAILED`, same guidance | Not retried by the driver | Same until the code changes |
 | DDL in a transaction (263, or 72 for an index build) | `FAILED`, guidance | Not retried | Same until the code changes |
 | Session from another `MongoClient` | `FAILED`, guidance | `MigrationFailedException` | Same until the wiring changes |
 | `inBatches` page k fails | Pages before k and their checkpoint committed; `FAILED` | `MigrationFailedException` | Outside step again, then pages from the checkpoint |
+| `inBatches` over `_id`s of two BSON types | The pages committed before the check and their checkpoint stay; `FAILED` | `MigrationFailedException` in `IN_BATCHES`, its cause an `IllegalStateException` naming both types | Same until `pending` selects one type ([batched-backfills.md](batched-backfills.md#_ids-of-more-than-one-bson-type)) |
+| A step commits, aborts or replaces godwit's transaction on its session | `FAILED`; the step's writes stay as its own commit or abort left them | `MigrationFailedException`, its cause an `IllegalStateException` | Same until the code changes ([a service starts its own transaction](transactions-and-sessions.md#a-service-starts-its-own-transaction)) |
 | Killed after the `APPLIED` commit, before the release | `APPLIED` | (process gone) | Fast path if nothing else is due; otherwise waits up to one lease for the lock |
 | Lock lost mid-run | `RUNNING` stays (a run that lost the lock writes nothing more); committed pages stay. When a step error coincides with the loss and no other run has taken over, `FAILED` with that error | `LockLostException`, with the step's error as its cause when there is one | The process that takes the lock resumes the migration |
 | Lock wait timeout | Nothing | `LockTimeoutException` | Waits again |
-| History write fails | Depends on the write ([below](#history-write-fails)) | The driver's exception, unchanged | Retries |
-| Standalone server, transactional step due | Nothing | `TransactionsUnsupportedException`, before the lock | Same until the server is a replica set |
+| History write fails | Depends on the write ([below](#history-write-fails)) | The driver's exception, unchanged; for the `FAILED` write, `MigrationFailedException` (or `LockLostException`) with the write's exception suppressed | Retries |
+| Standalone server, transactional step due | Nothing | `TransactionsUnsupportedException`, before the lock (or under it, when the plan made there has a transactional step due that the first plan did not) | Same until the server is a replica set |
 | Out of order under `OutOfOrder.FAIL` | Nothing | `PlanConflictException` | Same until resolved |
 | An adoption gap under `OutOfOrder.FAIL` | The `ADOPTED` documents | `PlanConflictException`, under the lock, after the hook ran | Calls the hook again, records only what is new, and refuses while the gap remains |
 | Partially superseded squash | Nothing | `PlanConflictException` | Same until the previous release is deployed |
@@ -291,7 +293,8 @@ app code:
 /**
  * Stores the payment gateway's status on every order that has a payment. The gateway calls run outside any
  * transaction, one per order; they only read, so a retry repeats them harmlessly. The statuses reach the transaction
- * as the outside step's value.
+ * as the outside step's value, and the transaction writes them in one bulk write: a round trip per batch of updates,
+ * not per order, so tens of thousands of orders stay well inside the transaction lifetime.
  */
 fun orderPaymentStatus(gateway: PaymentGateway): Migration = migration("009-order-payment-status")
     .outsideTransaction {
@@ -305,10 +308,10 @@ fun orderPaymentStatus(gateway: PaymentGateway): Migration = migration("009-orde
             .toMap()
     }
     .inTransaction { statuses ->
-        val orders = collection("orders")
-        statuses.forEach { (orderId, status) ->
-            orders.updateOne(session, eq("_id", orderId), set("paymentStatus", status.name))
+        val updates = statuses.map { (orderId, status) ->
+            UpdateOneModel<Document>(eq("_id", orderId), set("paymentStatus", status.name))
         }
+        if (updates.isNotEmpty()) collection("orders").bulkWrite(session, updates)
         count("ordersUpdated", statuses.size)
     }
 ```
@@ -359,24 +362,24 @@ val customerEmailLowerInOneTransaction = migration("007-customer-email-lower")
 
 **Before.** It applied in tests and on staging (40,000 customers, 3 s). Production has 2.4 million customers.
 
-**What happens.** The `updateMany` runs past the server's `transactionLifetimeLimitSeconds` (60 s). The server aborts the
-transaction; the next operation fails with `NoSuchTransaction` (251), labelled transient, so the driver runs the body
-again, which runs out of time too. When the driver's 120 s window ends, godwit fails the migration and adds guidance:
+**What happens.** The `updateMany` is still running when the server's `transactionLifetimeLimitSeconds` (60 s) ends. The
+server aborts the transaction and interrupts the update with `TransactionExceededLifetimeLimitSeconds` (290), which is
+not labelled transient, so the driver does not run the body again. godwit fails the migration and adds guidance:
 
 ```text
 WARN  godwit - Slow transaction id=007-customer-email-lower attempt=1 durationMs=60117
-WARN  godwit - Retrying transaction id=007-customer-email-lower attempt=2 error=NoSuchTransaction (251)
-WARN  godwit - Slow transaction id=007-customer-email-lower attempt=2 durationMs=60094
-ERROR godwit - Migration failed id=007-customer-email-lower step=IN_TRANSACTION attempts=1 error=com.mongodb.MongoCommandException: Command execution failed on MongoDB server with error 251 (NoSuchTransaction): ...
+ERROR godwit - Migration failed id=007-customer-email-lower step=IN_TRANSACTION attempts=1 error=com.mongodb.MongoCommandException: Command execution failed on MongoDB server with error 290 (TransactionExceededLifetimeLimitSeconds): ...
 ```
 
 ```text
-godwit.core.MigrationFailedException: Migration 007-customer-email-lower failed in IN_TRANSACTION: Command execution failed on MongoDB server with error 251 (NoSuchTransaction): 'Transaction with { txnNumber: 3 } has been aborted.' on server ...
+godwit.core.MigrationFailedException: Migration 007-customer-email-lower failed in IN_TRANSACTION: Command execution failed on MongoDB server with error 290 (TransactionExceededLifetimeLimitSeconds): 'operation was interrupted because the transaction exceeded the configured 'transactionLifetimeLimitSeconds'' on server ...
 The transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.
 ```
 
-**After.** `007` is `FAILED`. No customer has `emailLower`: both attempts rolled back. Every start fails the same way, about
-two minutes in.
+**After.** `007` is `FAILED`. No customer has `emailLower`: the attempt rolled back. Every start fails the same way,
+about a minute in. A step whose lifetime ends between two of its operations fails differently: the next operation
+gets `NoSuchTransaction` (251), labelled transient, so the driver runs the body again until its 120 s window ends, and
+the failure carries the same guidance ([transactions and sessions](transactions-and-sessions.md#transaction-lifetime-60-seconds)).
 
 **What you do.** Change `007`'s code. It applied on test and staging databases, where it never runs again; on
 production it has not applied, so the new code is what runs there. Both versions leave every customer with `emailLower`,
@@ -471,8 +474,9 @@ val customerEmailLowerIndex = migration("008-customer-email-lower-index")
     }
 ```
 
-godwit's own DDL helpers (`ensureCollection`, `ensureSearchIndex`, `dropIndexIfExists`) exist only in the outside step's
-scope, so calling them inside `inTransaction` does not compile. Raw driver calls cannot be stopped at compile time
+godwit's own DDL helpers (`ensureCollection`, `ensureSearchIndex`, `dropIndexIfExists`) are members of the outside
+step's scope only, so calling them unqualified inside `inTransaction` does not compile. Raw driver calls, and the
+helpers' public extension forms (`database.ensureCollection(...)`), cannot be stopped at compile time
 ([declaring-migrations.md](declaring-migrations.md)).
 
 ### Session from another MongoClient
@@ -492,10 +496,11 @@ fun startWithTwoClients() {
 }
 ```
 
-**What happens.** On a new database, `001` to `004` and `006` use only their scope's `collection(...)`, which comes from
-godwit's client, so they apply. `005` has no unlinked customers on a new database, so its transaction calls no service
-and applies too. `bootstrap-customers` passes `session` to `CustomerService.ensureCustomer` for each configured seed
-customer, and that service's collection belongs to `appClient`; the driver refuses a session from another client:
+**What happens.** On a new database, `001` to `004`, `006` and `reference-countries` use only their scope's
+`collection(...)`, which comes from godwit's client, so they apply. `005` has no unlinked customers on a new database,
+so its transaction calls no service and applies too. `bootstrap-customers` passes `session` to
+`CustomerService.ensureCustomer` for each configured seed customer, and that service's collection belongs to
+`appClient`; the driver refuses a session from another client:
 
 ```text
 godwit.core.MigrationFailedException: Migration bootstrap-customers failed in IN_TRANSACTION: state should be: ClientSession from same MongoClient
@@ -521,7 +526,7 @@ services from the `database` of the `TestGodwit` it migrates with catches this (
 
 ```text
 DEBUG godwit - Committed batch id=006-order-totals batch=40 lastId=66fcf2a19b1e8a0012a1c0d4
-ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 error=java.lang.NullPointerException: Cannot invoke "java.lang.Long.longValue()" because the return value of "org.bson.Document.getLong(Object)" is null
+ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 error=java.lang.NullPointerException: getLong(...) must not be null
 ```
 
 **After.** 20,000 orders have `totalMinor`; the rest do not. History keeps the checkpoint:
@@ -542,8 +547,8 @@ ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 e
   },
   "lastError": {
     "type": "java.lang.NullPointerException",
-    "message": "Cannot invoke \"java.lang.Long.longValue()\" because the return value of \"org.bson.Document.getLong(Object)\" is null",
-    "stack": "java.lang.NullPointerException: Cannot invoke ...\n\tat com.example.shop.migrations._006_order_totalsKt.totalOf(006-order-totals.kt:35)\n\t...",
+    "message": "getLong(...) must not be null",
+    "stack": "java.lang.NullPointerException: getLong(...) must not be null\n\tat com.example.shop.migrations._006_order_totalsKt.totalOf(006-order-totals.kt:32)\n\t...",
     "step": "IN_BATCHES",
     "at": { "$date": "2026-10-02T10:14:03.012Z" }
   },
@@ -610,12 +615,13 @@ godwit.core.LockLostException: Lost the migration lock while running 006-order-t
 
 The release in `finally` cannot reach the database either; the lease ends on its own.
 
-**After.** `006` is `RUNNING` with the checkpoint of the last committed page, owned by the lost run's token.
+**After.** `006` is `RUNNING` with the checkpoint of the last committed page, owned by the lost run's token until a
+process that acquires the lock writes its own marker (in the full timeline, one already has).
 
-**Next start.** Another process acquires the lock after the lease ends, logs `Resuming interrupted migration`, writes
-its own `RUNNING` marker (new owner token, `attempts: 2`), re-runs the outside step and continues after the checkpoint.
-If the lost run's last commit was still in flight, the owner fence makes it either land before the takeover (and the
-new run resumes after it) or fail; no page commits twice.
+**Next start.** Another process acquires the lock after the lease ends, writes its own `RUNNING` marker (new owner
+token, `attempts: 2`), logs `Resuming interrupted migration`, re-runs the outside step and continues after the
+checkpoint. If the lost run's last commit was still in flight, the owner fence makes it either land before the takeover
+(and the new run resumes after it) or fail; no page commits twice.
 
 **What you do.** Nothing, unless lock losses repeat: then the network or the replica set is the problem, or the lease is
 too short for the deployment's failovers ([locking.md](locking.md#edge-cases)). `Lock renewal failed` lines without a
@@ -664,8 +670,9 @@ in a `GodwitException`. What is left depends on which write failed:
 - **The first history read.** The cluster is unreachable at start. After the driver's server selection timeout (30 s
   by default), `migrate` throws `com.mongodb.MongoTimeoutException: Timed out while waiting for a server that matches
   ReadPreferenceServerSelector{readPreference=primary}...`. Nothing was written. The next start tries again.
-- **The `RUNNING` marker.** The migration's document is unchanged (missing, `FAILED` or `RUNNING` as before) and its
-  step never ran. The lock is released. The next start runs it.
+- **The `RUNNING` marker.** `migrate` throws the driver's exception; its step never ran. The migration's document is
+  unchanged (missing, `FAILED` or `RUNNING` as before), or `RUNNING` with this run's token when the marker applied and
+  only its reply failed. The lock is released. The next start runs it.
 - **The `APPLIED` record of a migration with only an outside step.** `002-carts` created `carts` and its indexes, then
   the write recording `APPLIED` failed. godwit sends the same fenced write once more, with majority write concern. When
   the first one failed before reaching the server, the second records the migration, and the call goes on. When the
@@ -678,13 +685,15 @@ in a `GodwitException`. What is left depends on which write failed:
 - **The `FAILED` record after a step failed.** Often the same outage that failed the step. The document stays as the
   step left it, without this run's `lastError`: `RUNNING`, or `APPLIED` when a commit applied and the majority was
   still behind when the `FAILED` write's own `timeoutMS` passed. `migrate` throws `MigrationFailedException` for the
-  step's failure, with the history write's exception attached as a suppressed exception. The next start logs
+  step's failure (`LockLostException` when the lock is lost by then), with the history write's exception attached as a
+  suppressed exception. When the `FAILED` write matches nothing and the read of the document that follows fails,
+  `migrate` throws the read's exception, with the step's exception attached as suppressed. The next start logs
   `Resuming interrupted migration` and retries, or finds the migration applied.
 - **The `ADOPTED` records.** On a replica set they are one transaction, and a failure that is not transient leaves
-  none of them. On a standalone server the ids written before the failure stay recorded. Either way godwit logs
-  `Adopted applied migrations` with the ids recorded (none in the transaction's case), then throws the driver's
-  exception. History holds nothing but `ADOPTED` documents, so the next start calls the hook again and records what is
-  missing.
+  none of them (unless the commit applied although the driver threw, which the next start finds). On a standalone
+  server the ids written before the failure stay recorded. Either way godwit logs `Adopted applied migrations` with the
+  ids it knows it recorded (none in the transaction's case), then throws the driver's exception. History holds nothing
+  but `ADOPTED` documents, so the next start calls the hook again and records what is missing.
 - **The release.** The lease ends on its own within 60 s; the next start waits at most that long.
 
 The `APPLIED` record of a transactional step is written inside the transaction: it commits with the step's writes or
@@ -849,12 +858,15 @@ The rules are in [ordering-and-validation.md](ordering-and-validation.md).
 
 `markApplied(id, reason)` records a once-only migration as `APPLIED` with origin `MARKED`, without running it. Use it
 when the migration's effect is already in the database, or must never be applied to this database, and code cannot
-express that. It refuses a repeatable or every-start migration (`IllegalArgumentException`): those are due again on the
-next start whatever their history says, so the way past one is code. Marking an id while once-only migrations listed
-before it are pending makes those out of order, so mark an id after the migrations before it have applied. To record
-several applied ids at once, stop every instance and mark the last-listed first, so that a start between two marks
-refuses as out of order instead of running the ids not yet marked
-([history-and-reports.md](history-and-reports.md#markappliedid-reason)).
+express that. It refuses an id whose history document a repeatable or every-start migration wrote
+(`IllegalArgumentException`): a mark would not change whether one runs (an every-start migration is due on every
+start, a repeatable until a run applies its current revision), so the way past one is code. `markApplied` takes no
+list, so an id with no document yet is recorded as a once-only `MARKED` document whatever the list declares; when the
+list declares it repeatable or every-start, the next start runs it all the same, as a migration whose document a run
+of another kind wrote, and its document keeps the mark's `reason`. Marking an id while once-only migrations listed before it are pending makes
+those out of order, so mark an id after the migrations before it have applied. To record several applied ids at once,
+stop every instance and mark the last-listed first, so that a start between two marks refuses as out of order instead of
+running the ids not yet marked ([history-and-reports.md](history-and-reports.md#markappliedid-reason)).
 
 On a `Godwit` built with `adoptApplied`, it also refuses while adoption has not ended: history is empty or holds only
 `ADOPTED` documents, so the hook still runs on every start that takes the lock. It throws `IllegalStateException` under
@@ -883,12 +895,11 @@ The hand-built index is the one `008` would build. Record that, with the reason:
  */
 fun markHandBuiltIndex() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        Godwit(client, config.mongo.database).markApplied(
-            "008-customer-email-lower-index",
-            reason = "Unique index on customers.emailLower built by hand as emailLower_unique during the 2026-10-05 incident"
-        )
-    }
+    val client = MongoClient.create(config.mongo.uri)
+    Godwit(client, config.mongo.database).markApplied(
+        "008-customer-email-lower-index",
+        reason = "Unique index on customers.emailLower built by hand as emailLower_unique during the 2026-10-05 incident"
+    )
 }
 ```
 

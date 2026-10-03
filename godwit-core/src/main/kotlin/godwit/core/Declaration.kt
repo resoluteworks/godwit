@@ -61,7 +61,7 @@ sealed class Migration {
      */
     abstract val id: String
 
-    /** Free text stored in history and shown in logs. */
+    /** Free text, stored in the migration's history document each time it runs; no log line prints it. */
     abstract val description: String?
 
     abstract val kind: MigrationKind

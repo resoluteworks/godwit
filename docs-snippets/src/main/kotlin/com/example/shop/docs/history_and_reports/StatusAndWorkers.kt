@@ -16,17 +16,16 @@ import kotlin.time.TimeSource
  */
 fun checkDeploy(): Int {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
-        val migrations = shopMigrations(config, CustomerService(database), identity)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val migrations = shopMigrations(config, CustomerService(database), identity)
 
-        val status = Godwit(client, config.mongo.database).status(migrations)
-        println("pending: ${status.pending}")
-        println("problems: ${status.problems}")
-        println("unknown applied: ${status.unknownApplied}")
-        return if (status.isUpToDate) 0 else 1
-    }
+    val status = Godwit(client, config.mongo.database).status(migrations)
+    println("pending: ${status.pending}")
+    println("problems: ${status.problems}")
+    println("unknown applied: ${status.unknownApplied}")
+    return if (status.isUpToDate) 0 else 1
 }
 
 /**

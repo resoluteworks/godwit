@@ -167,8 +167,8 @@ idempotent: the app's first migration and every upgrade migration call the same 
 | Do | Why |
 |---|---|
 | One function that creates the whole current schema, idempotently | the app's first migration and each upgrade call it on databases at any version |
-| Use `ensureCollection`, `ensureSearchIndex` and `dropIndexIfExists` | the raw `createCollection`, `createSearchIndex` and `dropIndex` throw when run twice |
-| Give a changed index a new name, and drop the old one with `dropIndexIfExists` | the same key with different options fails with `IndexOptionsConflict` (85) or `IndexKeySpecsConflict` (86) |
+| Use `ensureCollection`, `ensureSearchIndex` and `dropIndexIfExists` | the raw `createCollection`, `createSearchIndex` and `dropIndex` can fail when run a second time, depending on the server version and the options |
+| Give a changed index a new name: create it first, then drop the old one with `dropIndexIfExists` | under the old name, a changed unique, sparse, partial filter or collation option fails with `IndexKeySpecsConflict` (86) and a changed TTL with `IndexOptionsConflict` (85); building the new index first keeps the old one, and its unique constraint, in place until the new one is ready |
 | Data changes as functions that take a `ClientSession` | the app runs them inside its own transaction, with its history record |
 | For large data changes, publish the `pending` filter and a per-page function | the app pages with `inBatches` |
 | Take the collection name as a parameter when an app may need to choose it | an app may already have a collection with the library's default name |
@@ -301,12 +301,13 @@ Each page of 1000 files commits with its checkpoint; a restart resumes after it.
 
 State: file store 3.0 makes the `storageKey` index partial (unique among files that have a `storageKey`), keeping the
 key and the default name `storageKey_1`. On an existing database, the upgrade migration's `createIndexes` meets the old
-`storageKey_1` with different options, the server rejects it with `IndexOptionsConflict` (85), and the migration is
+`storageKey_1` with different options, the server rejects it with `IndexKeySpecsConflict` (86), and the migration is
 recorded `FAILED`; fresh databases are fine. What you do: the library gives the new index its own name
-(`storageKey_unique_partial`) and its setup function calls `dropIndexIfExists("storageKey_1")` before `createIndexes`.
-Both calls are idempotent, so the setup function still converges on databases at any version. Between the drop and
-the end of the build no unique index guards `storageKey`; the setup function runs in an outside step, so that window
-lasts as long as the index build.
+(`storageKey_unique_partial`), and its setup function calls `createIndexes` with it first and
+`dropIndexIfExists("storageKey_1")` after. The server accepts the partial index next to the old one, since their
+options differ, and both calls are idempotent, so the setup function still converges on databases at any version. The
+old `storageKey_1` guards `storageKey` until the new index is built, so no moment passes without a unique index on it;
+dropping first would leave that gap for as long as the build takes.
 
 ### The app already has a collection with the library's name
 

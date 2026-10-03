@@ -1,4 +1,4 @@
-// expect: Unresolved reference 'inTransaction' on receiver of type 'Migration'
+// expect: Unresolved reference 'inTransaction' on receiver of type 'Migration'.
 // docs/declaring-migrations.md: one transactional step per migration.
 package neg
 

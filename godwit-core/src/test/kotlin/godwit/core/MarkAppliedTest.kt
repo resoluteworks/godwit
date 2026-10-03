@@ -184,6 +184,23 @@ class MarkAppliedTest : StringSpec() {
             }
         }
 
+        "an id with no document is marked once-only whatever the list declares, so a repeatable with it still runs" {
+            GodwitFixture().use { f ->
+                f.godwit.markApplied("reference-countries", REASON)
+                f.stored("reference-countries").shouldNotBeNull().getString("kind") shouldBe "ONCE"
+
+                f.godwit.migrate(referenceCountries("2026-10-01")).ran.map { it.id } shouldBe
+                    listOf("reference-countries")
+
+                val stored = f.stored("reference-countries").shouldNotBeNull()
+                stored.getString("kind") shouldBe "REPEATABLE"
+                stored.getString("origin") shouldBe "RAN"
+                stored.getString("revision") shouldBe "2026-10-01"
+                // The marker and the APPLIED record leave fields they do not name, so the mark's reason stays.
+                stored.getString("reason") shouldBe REASON
+            }
+        }
+
         "a blank reason throws IllegalArgumentException before taking the lock or sending anything" {
             val recorder = CommandRecorder()
             TestMongo.client("mark-blank-reason", recorder).use { client ->

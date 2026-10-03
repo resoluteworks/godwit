@@ -55,15 +55,29 @@ fun initialSetup(searchIndexWait: Duration?): Migration = migration("001-initial
 What godwit does when it runs it:
 
 1. Records the migration RUNNING in `godwit-history`.
-2. Calls `checkLock()`, then the step, with an `OutsideTransactionScope` as its receiver: `database`, `collection(name)`,
-   `count(name, n)`, `checkLock()` and the three DDL helpers. There is no `session`.
+2. Calls `checkLock()`, then the step, with an `OutsideTransactionScope` as its receiver: `id`, `database`,
+   `collection(name)`, `count(name, n)`, `checkLock()` and the three DDL helpers. There is no `session`.
 3. Calls `checkLock()` again. A migration with no transactional step is then recorded APPLIED with its counters,
-   outside any transaction; a migration with one hands the step's return value to it
+   outside any transaction, fenced on this run's lock token; a migration with one hands the step's return value to it
    ([transactions and sessions](transactions-and-sessions.md)).
 
 Every write commits as it runs, and nothing ties the step's writes to the APPLIED record. A process that dies after
 the last `createIndex` but before step 3 leaves the schema complete and the record RUNNING, so the next start runs the
 whole step again. A step can run twice even when it finished, which is why every call in it must be safe to repeat.
+
+When the driver throws on the APPLIED write of step 3, godwit sends the same fenced write once more and, when it matches
+nothing, reads the document: a write that applied although its reply was lost leaves the document APPLIED by this run,
+and the migration counts as applied. Any other outcome propagates the driver's exception, and the next start finds the
+migration APPLIED or runs the step again.
+
+At least once holds for writes that a failover cannot roll back. godwit writes the APPLIED record with majority write
+concern; the step's own writes use your client's write concern. With `w:1` (set on the client, or the server's default
+before MongoDB 5.0 and, from 5.0, on a primary-secondary-arbiter replica set), the primary acknowledges a write before
+any secondary has it. If that primary fails before replicating it, the APPLIED record is written to the new primary,
+which never had the write, and the returning member rolls the write back: the history says APPLIED, and the step never
+runs again. Give an outside step's writes majority write concern: `w=majority` on the client (the server's own default
+on most replica sets from MongoDB 5.0), or `database.withWriteConcern(WriteConcern.MAJORITY)` and
+`collection(...).withWriteConcern(WriteConcern.MAJORITY)` inside the step.
 
 An outside step has no session. The fragment below is a migration's outside step that passes one.
 
@@ -80,8 +94,10 @@ This does not compile:
 | Call | Run again when its result already exists | Safe to repeat | Write it as |
 |---|---|---|---|
 | `createIndex` / `createIndexes`, same keys and options | No-op | Yes | The driver call |
-| `createIndex`, same keys, different options (unique, TTL, partial filter, collation) | `IndexOptionsConflict` (85) | Fails: real drift | See [Edge cases](#an-index-with-the-same-keys-and-different-options-exists) |
-| `createIndex`, same name, different keys | `IndexKeySpecsConflict` (86) | Fails: real drift | A new name, or drop and recreate in a new migration |
+| `createIndex`, same keys and name, different unique, sparse, partial filter or collation | `IndexKeySpecsConflict` (86) | Fails: real drift | See [Edge cases](#an-index-with-the-same-keys-and-different-options-exists) |
+| `createIndex`, same keys and name, different `expireAfterSeconds` | `IndexOptionsConflict` (85) | Fails: real drift | `collMod` in a new migration ([Changing an index](#changing-an-index-or-a-collection-option)) |
+| `createIndex`, same keys and options under another name | `IndexOptionsConflict` (85) | Fails: real drift | The existing name |
+| `createIndex`, same name, different keys | `IndexKeySpecsConflict` (86) | Fails: real drift | A new name, built before the old index is dropped in a new migration |
 | `createCollection` | `NamespaceExists` (48) before MongoDB 7.0; from 7.0 only when the options differ | No | `ensureCollection` |
 | `dropIndex` of an index that is gone | `IndexNotFound` (27) before MongoDB 8.3; from 8.3 it succeeds | No, before 8.3 | `dropIndexIfExists` |
 | `createSearchIndex` with a name that exists | `IndexAlreadyExists` (68) when the definition differs; the Atlas local image accepts the same definition again | No | `ensureSearchIndex` |
@@ -103,7 +119,7 @@ members of `OutsideTransactionScope`; everywhere else they are public extensions
 | Member (inside an outside step) | Extension (anywhere) | Returns | Behaviour |
 |---|---|---|---|
 | `ensureCollection(name, options)` | `MongoDatabase.ensureCollection(name, options)` | `true` when this call created it | Creates the collection unless one with that name exists. The options of an existing collection are neither compared nor changed. A concurrent create that the server refuses (`NamespaceExists`, 48: before MongoDB 7.0, or from 7.0 when the options differ) counts as existing; from 7.0 the server accepts a create with the same options, so two concurrent calls can both return `true`. |
-| `ensureSearchIndex(collection, name, definition, awaitReady)` | `MongoCollection<*>.ensureSearchIndex(name, definition, awaitReady)` | `true` when this call created it | Creates the Atlas Search index unless a search index with that name exists. The definition of an existing one is neither compared nor changed. A concurrent create of the same name counts as existing (`IndexAlreadyExists`, 68, when its definition differs). With `awaitReady` null it returns once the index is requested; otherwise it polls until the index is queryable and throws `SearchIndexNotReadyException` when `awaitReady` passes first. The member calls `checkLock()` between polls. |
+| `ensureSearchIndex(collection, name, definition, awaitReady)` | `MongoCollection<*>.ensureSearchIndex(name, definition, awaitReady)` | `true` when this call created it | Creates the Atlas Search index unless a search index with that name exists. The definition of an existing one is neither compared nor changed. A concurrent create of the same name counts as existing (`IndexAlreadyExists`, 68, when its definition differs). With `awaitReady` null it returns once the index is requested; otherwise it polls every second until the index is queryable and throws `SearchIndexNotReadyException` when `awaitReady` passes first. The member calls `checkLock()` between polls. |
 | `dropIndexIfExists(collection, indexName)` | `MongoCollection<*>.dropIndexIfExists(indexName)` | `true` when this call dropped it | Drops the index when `listIndexes` shows it; returns `false` when it does not exist, on every server version (from 8.3 `dropIndexes` itself succeeds for a missing index, so its result cannot tell). A concurrent drop that the server refuses (`IndexNotFound`, 27: before MongoDB 8.3) counts as gone; from 8.3 the server accepts the drop of a missing index, so two concurrent calls can both return `true`. |
 
 This step (a fragment of a migration) is wrong, because each line fails when a retry runs it again:
@@ -265,9 +281,10 @@ migration) makes one HTTP call per customer and checks the lock before each:
 ```
 
 Without `checkLock()` a run that lost the lock carries on until the step ends, while the new holder may already run the
-same step. Only the run that holds the lock can record APPLIED, and a transactional step's writes are fenced the same
-way (godwit fences them with the lock owner). An outside step's writes are not fenced: work the stale run still has in
-flight overlaps with the new holder's, and it can land after the new holder has moved on to later migrations.
+same step. Only the run that holds the lock can record APPLIED, because that write is fenced on the lock owner, and a
+transactional step's writes commit only in the same transaction as such a fenced history write. An outside step's
+writes are not fenced: work the stale run still has in flight overlaps with the new holder's, and it can land after the
+new holder has moved on to later migrations.
 Idempotent calls repeated one after another converge; calls that overlap need more:
 
 | In flight in the stale run | Hazard | What to do |
@@ -416,9 +433,15 @@ again. It would only change fresh databases, so production and a new test databa
 a new migration; on a fresh database `002-carts` creates the 30-day index and `010-cart-expiry-60-days` changes it a
 moment later.
 
-For changes `collMod` cannot make (unique, partial filter, collation, keys), drop the old index with
-`dropIndexIfExists` and create the new one in the same step. Both calls are safe to repeat, and the index is missing
-for as long as the new build takes.
+From MongoDB 6.0, `collMod` also makes an existing index unique, in two calls: `prepareUnique: true`, after which
+the index rejects new duplicates, then `unique: true`, which fails with `CannotConvertIndexToUnique` (359) while
+existing documents share a key. Both calls are safe to repeat, and the index serves queries throughout.
+
+For changes `collMod` cannot make (partial filter, collation, keys), create the new index under a new name first, then
+drop the old one with `dropIndexIfExists`, in the same step. The server accepts a second index on the same keys when its
+options differ. Both calls are safe to repeat, and the old index keeps serving queries, and keeps any unique
+constraint, until the new one is built. Dropping first would leave the collection without either for as long as the
+build takes.
 
 ## Renaming a collection
 
@@ -472,12 +495,17 @@ You: nothing.
 On a database adopted from hand-run scripts, `customers` already has a non-unique `email_1` index. `001-initial-setup`
 asks for `email_1` unique.
 
-godwit: `createIndex` fails with `IndexOptionsConflict` (85). The migration is recorded FAILED and `migrate` throws
-`MigrationFailedException` on every start. godwit does not guess which definition is right.
+godwit: `createIndex` fails with `IndexKeySpecsConflict` (86), "An existing index has the same name as the requested
+index". The migration is recorded FAILED and `migrate` throws `MigrationFailedException` on every start. godwit does
+not guess which definition is right.
 
-You: make the database match the migration. Check that no two customers share an email, drop the stray index by hand
-(`db.customers.dropIndex("email_1")` in `mongosh`) and restart: the step runs again and builds the unique index. When
-the shop needs a different index, change it for every database in a new migration.
+You: make the database match the migration by converting the index in place, with `collMod` in `mongosh` (MongoDB 6.0
+or later). First `db.runCommand({collMod: "customers", index: {keyPattern: {email: 1}, prepareUnique: true}})`: from
+then on the index rejects a new duplicate email. Then the same command with `unique: true`; while two customers share
+an email it fails with `CannotConvertIndexToUnique` (359), so resolve those customers and run it again. Restart: the
+step runs again, and its `createIndex` finds the unique `email_1` it asks for. Dropping the index and letting the step
+build it again would leave `customers` without a unique email between the duplicate check and the end of the build.
+When the shop needs a different index, change it for every database in a new migration.
 
 ### A collection exists with different options
 
@@ -529,9 +557,11 @@ for the rest.
 A network partition cuts the process off from the primary for 70 s while `005-customer-external-ids` makes its HTTP
 calls.
 
-godwit: the heartbeat cannot renew the lease, so this run marks the lock lost. The next `checkLock()`, before the next
-customer, throws `LockLostException`, and `migrate` throws it. Another process takes the lock after the lease expires
-and runs the migration from its outside step.
+godwit: the heartbeat cannot renew the lease, and once `lease - safetyMargin` (50 s by default) has passed since its
+last successful renewal was sent, this run counts the lock as lost. The next `checkLock()`, before the next customer,
+throws `LockLostException`, and `migrate` throws it; godwit writes nothing more, so the history document stays
+RUNNING. Another process takes the lock after the lease expires, logs "Resuming interrupted migration" and runs the
+migration from its outside step.
 
 You: let the process restart. See [locking](locking.md).
 

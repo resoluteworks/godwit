@@ -1,4 +1,4 @@
-// expect: No value passed for parameter 'gateway'
+// expect: No value passed for parameter 'gateway'.
 // docs/dependencies.md: a list function whose migrations need a new service does not compile until the caller passes it.
 package neg
 

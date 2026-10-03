@@ -10,6 +10,7 @@ import com.mongodb.client.model.Filters.ne
 import com.mongodb.client.model.Indexes.ascending
 import com.mongodb.client.model.Indexes.compoundIndex
 import com.mongodb.client.model.Indexes.descending
+import com.mongodb.client.model.UpdateOneModel
 import com.mongodb.client.model.Updates.set
 import godwit.core.Migration
 import godwit.core.migration
@@ -40,10 +41,10 @@ fun orderPaymentStatusEscaping(gateway: PaymentGateway): Migration = migration("
             .toMap()
     }
     .inTransaction { statuses ->
-        val orders = collection("orders")
-        statuses.forEach { (orderId, status) ->
-            orders.updateOne(eq("_id", orderId), set("paymentStatus", status.name)) // no session
+        val updates = statuses.map { (orderId, status) ->
+            UpdateOneModel<Document>(eq("_id", orderId), set("paymentStatus", status.name))
         }
+        if (updates.isNotEmpty()) collection("orders").bulkWrite(updates) // no session
         count("ordersUpdated", statuses.size)
     }
 

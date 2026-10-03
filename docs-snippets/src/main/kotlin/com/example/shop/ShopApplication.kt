@@ -9,16 +9,15 @@ import godwit.core.Godwit
 
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
 
-        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
+    Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 
 /** The rest of the shop: serves requests until the process stops. */

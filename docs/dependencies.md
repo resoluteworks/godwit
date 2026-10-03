@@ -74,16 +74,15 @@ and only the two migrations that call services get services.
 ```kotlin
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
 
-        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
+    Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 ```
 
@@ -101,7 +100,8 @@ gateway is a service no migration has used so far.
 /**
  * Stores the payment gateway's status on every order that has a payment. The gateway calls run outside any
  * transaction, one per order; they only read, so a retry repeats them harmlessly. The statuses reach the transaction
- * as the outside step's value.
+ * as the outside step's value, and the transaction writes them in one bulk write: a round trip per batch of updates,
+ * not per order, so tens of thousands of orders stay well inside the transaction lifetime.
  */
 fun orderPaymentStatus(gateway: PaymentGateway): Migration = migration("009-order-payment-status")
     .outsideTransaction {
@@ -115,10 +115,10 @@ fun orderPaymentStatus(gateway: PaymentGateway): Migration = migration("009-orde
             .toMap()
     }
     .inTransaction { statuses ->
-        val orders = collection("orders")
-        statuses.forEach { (orderId, status) ->
-            orders.updateOne(session, eq("_id", orderId), set("paymentStatus", status.name))
+        val updates = statuses.map { (orderId, status) ->
+            UpdateOneModel<Document>(eq("_id", orderId), set("paymentStatus", status.name))
         }
+        if (updates.isNotEmpty()) collection("orders").bulkWrite(session, updates)
         count("ordersUpdated", statuses.size)
     }
 ```
@@ -164,17 +164,16 @@ e: No value passed for parameter 'gateway'.
 /** The shop's startup once 009 is added. The gateway connects only if a migration calls it. */
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
-        val gateway = LazyPaymentGateway { connectPaymentGateway() }
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val gateway = LazyPaymentGateway { connectPaymentGateway() }
 
-        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity, gateway))
+    Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity, gateway))
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 ```
 
@@ -210,10 +209,11 @@ do, mocks included:
 }
 ```
 
-A hand-written fake is a class:
+A hand-written fake is a class. The shop keeps this one with its other test fixtures, for every test to share
+([testing](testing.md#fixtures)):
 
 ```kotlin
-private class FakeIdentityProvider : IdentityProvider {
+class FakeIdentityProvider : IdentityProvider {
     override fun findOrCreateUser(email: String) = ExternalUser(id = "user-$email", email = email)
 }
 ```
@@ -281,10 +281,11 @@ fun mainWithTwoClients() {
 }
 ```
 
-What godwit does: on a fresh database `001` to `004` run, because they only use the step's own `collection(...)`, which
-belongs to godwit's client. `005-customer-external-ids` runs its outside step (the HTTP calls), then its transaction
-passes godwit's session to `customers.setExternalUserId`, whose collection belongs to the other client. The driver
-rejects the session, the transaction rolls back, and the migration is recorded `FAILED`:
+What godwit does: on a database at `004` whose customers are not linked to the identity provider yet,
+`005-customer-external-ids` runs its outside step (the HTTP calls), then its transaction passes godwit's session to
+`customers.setExternalUserId`, whose collection belongs to the other client. The driver rejects the session, the
+transaction rolls back, and the migration is recorded `FAILED` (`001` to `004` call no service: they use only their
+step's `database` and `collection(...)`, which belong to godwit's client, so they apply with two clients as well):
 
 ```text
 ERROR godwit - Migration failed id=005-customer-external-ids step=IN_TRANSACTION attempts=1 error=java.lang.IllegalStateException: state should be: ClientSession from same MongoClient
@@ -294,9 +295,10 @@ Caused by: java.lang.IllegalStateException: state should be: ClientSession from 
 ```
 
 What you do: build every service from the client you give `Godwit`, as `main` above does. Two `MongoDatabase` objects
-from the same client are fine; two clients are not, even with the same connection string. In tests, call `testGodwit()`
-once (`val db = testGodwit()`) and build the services from `db.database` or `db.client`, the client of `db.godwit`. The
-next start retries `005` from its outside step. See
+from the same client are fine; two clients are not, even with the same connection string. In tests, build the services
+from the `TestGodwit` whose `godwit` runs the migrations (`val db = testGodwit()`, then `db.database` or `db.client`):
+another `testGodwit()` call returns another database, on another client when its `atlasSearch` differs. The next start
+retries `005` from its outside step. See
 [transactions and sessions](transactions-and-sessions.md#one-mongoclient).
 
 ### A service that is expensive or fragile to build
@@ -316,8 +318,8 @@ class LazyPaymentGateway(connect: () -> PaymentGateway) : PaymentGateway {
 }
 ```
 
-`main` passes `LazyPaymentGateway { connectPaymentGateway() }`. A start where `009` is due connects on the first
-`paymentStatus` call; every other start never connects. The migration's signature does not change, and tests pass a
+`main` passes `LazyPaymentGateway { connectPaymentGateway() }`, where `connectPaymentGateway()` is the shop's sign-in to
+the gateway's client library. A start where `009` is due connects on the first `paymentStatus` call; every other start never connects. The migration's signature does not change, and tests pass a
 plain mock.
 
 ### A worker process that only checks the schema
@@ -325,20 +327,19 @@ plain mock.
 State: the shop deploys a background worker from the same build. The worker must not migrate (the shop does that) and
 must not start on a database older than its code. It has no identity provider or payment gateway credentials.
 `requireUpToDate` reads history and compares it with the list; it runs no step, so the worker passes stand-ins for the
-services it does not have:
+services it does not have, then runs its own loop (`processPaidOrders`, the worker's code):
 
 ```kotlin
 /** A background worker deployed next to the shop. It never migrates; it refuses to start on an older schema. */
 fun workerMain() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val migrations = shopMigrations(config, CustomerService(database), NoIdentityProvider, NoPaymentGateway)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val migrations = shopMigrations(config, CustomerService(database), NoIdentityProvider, NoPaymentGateway)
 
-        Godwit(client, config.mongo.database).requireUpToDate(migrations)
+    Godwit(client, config.mongo.database).requireUpToDate(migrations)
 
-        processPaidOrders(OrderService(database))
-    }
+    processPaidOrders(OrderService(database))
 }
 
 /** The worker has no identity provider credentials. requireUpToDate runs no step, so nothing calls this. */

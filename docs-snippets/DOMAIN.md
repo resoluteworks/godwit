@@ -20,7 +20,8 @@ and `../godwit-test/api/godwit-test.api`. Never invent an API that is not there.
 | `neg/`, `../scripts/neg-check.sh` | snippets that must not compile, and the script that proves it |
 | `../scripts/check-snippets.sh [repo-dir]` | proves every ```kotlin block in the repo's `README.md` and `docs/**/*.md` appears, after whitespace normalisation, as a contiguous run of lines in one file under `src/main/kotlin`, or under `neg/` when the block follows a line reading exactly `This does not compile:` |
 | `../scripts/check-links.sh [repo-dir]` | proves every relative link in the repo's `README.md` and `docs/**/*.md` resolves to an existing file and, with a `#fragment`, to a heading or explicit anchor in it |
-| `../scripts/check-content.sh [dir]` | content rules for the whole repository: no em dash, en dash only in numeric ranges, no history narrative, no banned phrases |
+| `../scripts/check-content.sh [dir]` | content rules for every `.kt`, `.kts`, `.md` and `.sh` file of the repository: no em dash, en dash only in numeric ranges, no history narrative, no banned phrases; and in the repo's `README.md` and `docs/**` outside `docs/development`, no package of this build (`com.example.shop.docs`) |
+| `../godwit-core/build.gradle.kts` (`docsShop` source set) | compiles the files it lists from `src/main/kotlin` (the canonical migrations, the services and configuration they use, the file store and a few doc packages) into godwit-core's tests, unchanged and never reformatted, where `DocsFidelityTest` runs the scenarios behind the outputs the docs quote; quoted stack frames name these files by line |
 | `../scripts/check-docs.sh` | runs the compile, `neg-check.sh`, `check-snippets.sh`, `check-links.sh` and `check-content.sh` in that order and stops at the first failure |
 
 Build: `./gradlew --offline compileKotlin` from `docs-snippets/`. It builds godwit-core and godwit-test from the root
@@ -153,6 +154,10 @@ builds `CustomerService(database)`, `OrderService(database)` and `HttpIdentityPr
 `Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))`, then calls
 `startHttpServer(customers, orders)` (the rest of the app). Migrations run before the server starts serving.
 
+`src/main/kotlin/com/example/shop/RestOfTheApp.kt`: `connectPaymentGateway()`, the sign-in to the payment gateway's
+client library that `LazyPaymentGateway` defers, and `processPaidOrders(orders)`, the background worker's loop. Both are
+stubs: the docs call them, and only their signatures matter.
+
 ## Tests
 
 `src/main/kotlin/com/example/shop/migrations/ShopMigrationsTest.kt` (a `src/test/kotlin` file in a real project):
@@ -179,8 +184,8 @@ Use these when a doc needs a migration the canonical list does not have, so docs
 
 | Purpose | Id(s) | Shape |
 |---|---|---|
-| Data then schema (two migrations) | `007-customer-email-lower` then `008-customer-email-lower-index` | canonical files `src/main/kotlin/com/example/shop/migrations/007-customer-email-lower.kt` and `008-customer-email-lower-index.kt`. 007: inBatches of 1000 over `customers`, sets `emailLower` (Kotlin `lowercase(Locale.ROOT)`, skips customers without an email); 008: outside, partial unique index on `emailLower` |
-| A migration calling the payment gateway | `009-order-payment-status` | canonical file `src/main/kotlin/com/example/shop/migrations/009-order-payment-status.kt`, `fun orderPaymentStatus(gateway: PaymentGateway)`. outside: `gateway.paymentStatus(paymentId)` per order with `ne("paymentId", null)` and no `paymentStatus`, returns `Map<ObjectId, PaymentStatus>`; inTransaction writes `paymentStatus` |
+| Data then schema (two migrations) | `007-customer-email-lower` then `008-customer-email-lower-index` | canonical files `src/main/kotlin/com/example/shop/migrations/007-customer-email-lower.kt` and `008-customer-email-lower-index.kt`. 007: inBatches of 1000 over `customers` with `pending = exists("emailLower", false)`, sets `emailLower` (Kotlin `trim().lowercase(Locale.ROOT)`), skips customers without an email; counters `customersUpdated`, `customersWithoutEmail`; 008: outside, partial unique index on `emailLower` |
+| A migration calling the payment gateway | `009-order-payment-status` | canonical file `src/main/kotlin/com/example/shop/migrations/009-order-payment-status.kt`, `fun orderPaymentStatus(gateway: PaymentGateway)`. outside: `gateway.paymentStatus(paymentId)` per order with `ne("paymentId", null)` and no `paymentStatus`, calling `checkLock()` per order, returns `Map<ObjectId, PaymentStatus>`; inTransaction writes `paymentStatus` with one `bulkWrite` of `UpdateOneModel`s (none when the map is empty); counter `ordersUpdated` |
 | Every other example migration | `010` onward, one number per example | a wrong version shown next to its fix shares the fix's id |
 | Two branches that both add the next number (pure check) | `007-product-slugs` and `007-cart-currency` | `validateMigrations` reports that the numeric prefixes do not strictly increase |
 | Out of order (database check) | `008-cart-currency` applied on staging from one branch, then `007-product-slugs` merged from another | `migrate` throws `PlanConflictException` under `OutOfOrder.FAIL`; `OutOfOrder.RUN` runs 007 and records `outOfOrder: true` |
@@ -200,7 +205,7 @@ Use these when a doc needs a migration the canonical list does not have, so docs
 | history | the `godwit-history` collection, one document per migration, `_id` = migration id |
 | lock | the `godwit-lock` document; one holder at a time, leased, renewed by a heartbeat |
 | holder | `GodwitConfig.holder`, `<hostname>/<pid>` by default |
-| fast path | nothing due: one history read, no lock |
+| fast path | nothing due and no squash to record: one history read, no lock |
 | adoption | adopting a database migrated by another tool, or by hand, through `GodwitConfig.adoptApplied` |
 | squash | a superseding migration declared with `supersedes = listOf(...)` |
 | untracked database | collections present, no godwit history, nothing adopted |
@@ -209,13 +214,14 @@ Use these when a doc needs a migration the canonical list does not have, so docs
 
 Log lines (logger `godwit`, slf4j key-value pairs as Logback's `%kvp{NONE}` prints them: values unquoted, lists as
 `[a, b]`, times as ISO-8601 instants with milliseconds, `error` on "Migration failed" as the exception's class and
-message, `error` on "Retrying transaction" as `<codeName> (<code>)` or `commit`; the full list of events is in the
-`Godwit` KDoc in `../godwit-core/src/main/kotlin/godwit/core/Godwit.kt`). Holder `shop-7f9c4/1`, run ids are UUIDs.
+message, `error` on "Retrying transaction" as `<codeName> (<code>)`, or the exception's class and code for an error
+without a code name, or `commit`; the full list of events is in the `Godwit` KDoc in
+`../godwit-core/src/main/kotlin/godwit/core/Godwit.kt`). Holder `shop-7f9c4/1`, run ids are UUIDs.
 "Migrations up to date" only appears for a list without an every-start migration (`checked=7` is the shop's list
-without `bootstrap-customers`):
+without `bootstrap-customers`). One example line per event; the lines do not form one run:
 
 ```text
-INFO  godwit - Migrations up to date runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f checked=7 durationMs=6
+INFO  godwit - Migrations up to date runId=0199a4c3-5f60-7b21-9e8d-1a2b3c4d5e6f checked=7 durationMs=6
 INFO  godwit - Waiting for migration lock holder=shop-7f9c4/1 holderRunId=0199a4c1-0d2e-7a11-8c3b-5d6e7f809a1b expiresAt=2026-10-02T10:15:00.210Z waitedMs=10004
 INFO  godwit - Acquired migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f lockWaitMs=212
 INFO  godwit - Running migration id=004-order-status kind=ONCE steps=[IN_TRANSACTION] attempt=1

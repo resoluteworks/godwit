@@ -1,4 +1,4 @@
-// expect: Unresolved reference 'ensureCollection'
+// expect: Unresolved reference 'ensureCollection'.
 // docs/declaring-migrations.md: the DDL helpers exist in outsideTransaction only.
 package neg
 

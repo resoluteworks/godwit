@@ -483,8 +483,9 @@ the baseline's place, so the earlier ids still missing are a gap
 
 ### Unknown applied ids
 
-An id is unknown when history records it `APPLIED` and the list neither declares it nor finds it in the stored
-`supersedes` list of a superseding migration recorded in history. The normal cause is a rollback deploy.
+An id is unknown when history records it `APPLIED`, the list neither declares it nor names it in a `supersedes` list,
+and no history document's stored `supersedes` list names it (a superseding migration stores its list in its history
+document when it is recorded `SUPERSEDED` or applied by a run). The normal cause is a rollback deploy.
 
 A walkthrough. Release 1.4 adds `007-product-slugs` and `008-cart-currency` and deploys; production applies both. 1.4
 has a bug in an unrelated feature, and the team redeploys 1.3, whose list ends at `006-order-totals`.

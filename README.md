@@ -1,18 +1,20 @@
 # godwit
 
-**Status: pre-release.** No version is published yet. The API on this page and in [docs](docs/) is designed and
-compile-checked; the implementation follows the [implementation plan](docs/development/implementation-plan.md). The
-first release is `0.1.0`, and godwit stays on 0.x until it has run in a production application
+**Status: pre-release `0.1.0`, not yet on Maven Central.** Version `0.1.0` is implemented and tested, and the examples
+on this page and in [docs](docs/) compile and run against it. Until it is on Maven Central, `make publish-local` at the
+root of this repository installs it in Maven Local, and a build that adds `mavenLocal()` to its repositories can use
+it. godwit stays on 0.x until it has run in a production application
 ([DD-25](docs/design-decisions.md#dd-25-0x-until-proven-in-production)).
 
 godwit runs MongoDB schema and data migrations for Kotlin JVM applications. A migration is a plain Kotlin value, built
 by a chain of calls, and an application lists its migrations in a plain `List<Migration>`: the list is the registry
 and the run order. There are no annotations, no reflection, no classpath scanning, no code generation and no
 dependency injection: a migration that needs a service is a function that takes it as a parameter. Each step's name
-states its guarantee: `outsideTransaction` runs at least once and must be idempotent, `inTransaction` commits exactly
-once together with its history record, `inBatches` commits each page exactly once with a checkpoint. A lease lock
-serialises every process that shares the database, a history collection holds one document per migration, and godwit
-rolls forward only. godwit-core has two runtime dependencies: the MongoDB Kotlin sync driver and slf4j-api.
+states its guarantee: `outsideTransaction` runs at least once and must be idempotent (its writes need majority write
+concern to survive a failover), `inTransaction` commits exactly once together with its history record, `inBatches`
+commits each page exactly once with a checkpoint. A lease lock serialises every process that shares the database, a
+history collection holds one document per migration, and godwit rolls forward only. godwit-core has two runtime
+dependencies besides the Kotlin standard library: the MongoDB Kotlin sync driver and slf4j-api.
 
 | Principle | What it means in code |
 |---|---|
@@ -22,7 +24,7 @@ rolls forward only. godwit-core has two runtime dependencies: the MongoDB Kotlin
 | Step names state the guarantee | `outsideTransaction` (at least once), `inTransaction` (exactly once), `inBatches` (exactly once per page) |
 | Built in | the lock (`godwit-lock`), the history (`godwit-history`), transactions with the history record inside them |
 | Roll forward only | no down migrations; `markApplied(id, reason)` is the audited way to skip one |
-| Two runtime dependencies | `org.mongodb:mongodb-driver-kotlin-sync` and `org.slf4j:slf4j-api`; no framework integrations |
+| Two runtime dependencies | `org.mongodb:mongodb-driver-kotlin-sync` and `org.slf4j:slf4j-api`, besides the Kotlin standard library; no framework integrations |
 
 ## Requirements
 
@@ -31,7 +33,7 @@ rolls forward only. godwit-core has two runtime dependencies: the MongoDB Kotlin
 | JDK | 21 or later | godwit's bytecode targets Java 21 ([DD-26](docs/design-decisions.md#dd-26-jvm-21-and-kotlin-24)) |
 | Kotlin | 2.4 or later | godwit is built with Kotlin 2.4.20 and supports consumers that compile with Kotlin 2.4 or later ([DD-26](docs/design-decisions.md#dd-26-jvm-21-and-kotlin-24)) |
 | MongoDB Kotlin sync driver | 5.7.0 | `org.mongodb:mongodb-driver-kotlin-sync`, an `api` dependency of godwit-core: the driver's types are in godwit's API |
-| MongoDB server | 4.4 or later | See [compatibility](docs/architecture.md#compatibility) |
+| MongoDB server | 4.4.2 or later | godwit's own tests run against 8.0 and 8.3; see [compatibility](docs/architecture.md#compatibility) |
 | Replica set or sharded cluster | | Needed when a transactional step (`inTransaction`, `inBatches`) is due. A single-node replica set is enough; outside-only migrations also run on a standalone server |
 | Atlas, or the Atlas local image | | Only for `ensureSearchIndex` |
 | Docker | | Only for `godwit-test`, which starts MongoDB in a container |
@@ -40,7 +42,9 @@ rolls forward only. godwit-core has two runtime dependencies: the MongoDB Kotlin
 
 ### Add the dependencies
 
-godwit's artifacts are on Maven Central from the first release. Set the version once in `gradle.properties`:
+godwit's artifacts go to Maven Central with its first release. Until then, run `make publish-local` at the root of
+this repository, which installs them in Maven Local, and keep the `mavenLocal` repository below; once they are on
+Maven Central, `mavenCentral()` alone is enough. Set the version once in `gradle.properties`:
 
 ```properties
 godwitVersion=<version>
@@ -52,6 +56,10 @@ and add the two artifacts in `build.gradle.kts`:
 val godwitVersion: String by project
 
 repositories {
+    // Only until godwit is on Maven Central: the artifacts `make publish-local` installs.
+    mavenLocal {
+        content { includeGroup("works.resolute") }
+    }
     mavenCentral()
 }
 
@@ -144,10 +152,9 @@ import godwit.core.Migration
 val migrations: List<Migration> = listOf(carts, orderStatus)
 
 fun main() {
-    MongoClient.create(System.getenv("MONGO_URI")).use { client ->
-        Godwit(client, "shop").migrate(migrations)
-        // Build the app's services from this same client, then start serving requests.
-    }
+    val client = MongoClient.create(System.getenv("MONGO_URI"))
+    Godwit(client, "shop").migrate(migrations)
+    // Build the app's services from this same client, then start serving requests.
 }
 ```
 
@@ -156,6 +163,11 @@ list before any I/O, reads history, and returns at once when nothing is due. Oth
 process waits for it), runs every due migration in list order and returns a `MigrationReport`. Build the services your
 migrations call from the same `MongoClient`: the session godwit opens for a transactional step is valid only on that
 client.
+
+When a process dies in the middle of a migration, the next start takes over once the dead process's lease has ended
+(60 s by default): an outside step runs again from its first line, a transaction that had not committed runs again,
+and an `inBatches` step resumes after its last committed page
+([failure semantics](docs/failure-and-recovery.md#failure-semantics)).
 
 On a database that already has collections but no godwit history, such as one migrated by hand or by another tool, the
 first `migrate` throws `UntrackedDatabaseException` and runs nothing, so it cannot re-run migrations over live data.
@@ -180,6 +192,9 @@ Every later start finds nothing due, reads history once and takes no lock:
 ```text
 INFO  godwit - Migrations up to date runId=0199a4c3-0a11-7c52-8d93-e4f5a6b7c8d9 checked=2 durationMs=5
 ```
+
+[What to alert on](docs/configuration.md#what-to-alert-on) lists the lines that need attention, and the failures
+godwit throws without a log line of its own.
 
 ### Test them
 
@@ -221,10 +236,23 @@ class MigrationsTest : StringSpec({
 })
 ```
 
+The test sits in the package of the file that declares `migrations`, which is why it needs no import for it.
 `validateMigrations` needs no database. `rerun` runs a migration a second time through the runner, which proves it is
 safe to repeat. See [testing](docs/testing.md) for the whole kit.
 
 ## Documentation
+
+| I want to | Read |
+|---|---|
+| Know what happens when the process dies mid-migration | [Failure semantics](docs/failure-and-recovery.md#failure-semantics) |
+| Alert on migration trouble | [What to alert on](docs/configuration.md#what-to-alert-on) |
+| Backfill millions of documents | [A batched step](docs/batched-backfills.md#a-batched-step) |
+| Call an external service from a migration | [Dependencies](docs/dependencies.md), [external services](docs/outside-transaction-steps.md#external-services) |
+| Keep reference data in step with the code | [A repeatable](docs/repeatable-migrations.md#a-repeatable-reference-data-by-revision) |
+| Take over a database migrated by hand or by another tool | [The short version](docs/adopting-an-existing-database.md#the-short-version) |
+| Replace old migrations with one baseline | [Squashing procedure](docs/squashing-migrations.md#procedure) |
+| Test one migration on its own | [One migration on its own](docs/testing.md#one-migration-on-its-own) |
+| Get past a migration that cannot apply on one database | [Manual repair](docs/failure-and-recovery.md#manual-repair-with-markapplied) |
 
 Read in this order; each page builds on the ones before it.
 
@@ -257,8 +285,8 @@ Read in this order; each page builds on the ones before it.
     and one list in a multi-module app.
 15. [Testing migrations](docs/testing.md): `testGodwit()`, `Target`, `rerun`, `runIsolated`, `forget`,
     `shouldHaveApplied` and `SessionEscapeDetector`.
-16. [Configuration](docs/configuration.md): every setting of `GodwitConfig` and `LockConfig`, per-environment setup and
-    logging.
+16. [Configuration](docs/configuration.md): every setting of `GodwitConfig` and `LockConfig`, per-environment setup,
+    logging and what to alert on.
 17. [Architecture](docs/architecture.md): the components, the runner's algorithm, the state machine, the exact lock and
     history operations, compatibility.
 18. [Design decisions](docs/design-decisions.md): every design decision, with the options considered, the reasoning

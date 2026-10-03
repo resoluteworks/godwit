@@ -19,7 +19,7 @@ fun shopGodwit(client: MongoClient, config: ShopConfig): Godwit = Godwit(client,
 | `databaseName` | The database to migrate. One `Godwit` migrates one database. |
 | `config` | A `GodwitConfig`. Defaults to `GodwitConfig()`. |
 
-- **Use the client the app's services use.** The session that godwit opens for a transactional step is valid only with the client that opened it. A service built on another client fails with `ClientSession from same MongoClient`. The shop builds one `MongoClient` and gives it to the services and to `Godwit` (see [wiring at startup](dependencies.md#wiring-at-startup)).
+- **Use the client the app's services use.** The session that godwit opens for a transactional step is valid only with the client that opened it. A service built on another client fails with an `IllegalStateException`, `state should be: ClientSession from same MongoClient`. The shop builds one `MongoClient` and gives it to the services and to `Godwit` (see [wiring at startup](dependencies.md#wiring-at-startup)).
 - **`Godwit` keeps no state between calls.** Every `migrate`, `status` and `history` call reads history again. Instances are cheap, and a process usually builds one at startup.
 - **A multi-database application builds one `Godwit` per database**, each with its own list, and loops over them itself.
 
@@ -30,13 +30,13 @@ godwit owns two collections in the database: the history collection (one documen
 | Setting | Type | Default | What it does | Change it when |
 |---|---|---|---|---|
 | `historyCollection` | `String` | `"godwit-history"` | One document per migration; `_id` is the migration id | your naming convention needs another name; never on a database that already has history (see the edge cases) |
-| `lockCollection` | `String` | `"godwit-lock"` | One lock document; its `_id` is the history collection's name | the history name changes |
+| `lockCollection` | `String` | `"godwit-lock"` | One lock document; its `_id` is the history collection's name, so configurations with different history collections never share a lock | your naming convention needs another name; change it with every instance stopped, because runs that use two lock collections do not exclude each other |
 | `lock` | `LockConfig` | `LockConfig()` | Lease, heartbeat, margin and wait (below) | migrations run for minutes, or the cluster fails over slowly |
 | `outOfOrder` | `OutOfOrder` | `FAIL` | What happens to a pending once-only migration that is listed before an applied once-only migration | a database ran a branch early (staging, a developer's database): `RUN` |
 | `unknownApplied` | `UnknownApplied` | `WARN` | What happens when history holds an applied id that the list does not know | a CI job migrates a copy of production and the build must not be older than it: `FAIL` |
-| `untrackedDatabase` | `UntrackedDatabase` | `REFUSE` | What happens when the database has collections, no godwit history, and nothing was adopted | a database whose migrations are safe to repeat: `RUN_ALL`, rarely |
-| `adoptApplied` | `((MongoDatabase) -> Set<String>)?` | `null` | Returns the ids already applied, to adopt a database migrated by another tool or by hand. Called under the lock while history holds nothing but `ADOPTED` documents, so possibly more than once: it must only read | while databases are adopted; see [adopting-an-existing-database.md](adopting-an-existing-database.md) |
-| `slowTransactionWarning` | `Duration` | `20.seconds` | A transaction attempt slower than this logs `Slow transaction` | the server's transaction lifetime differs from 60 s, or you want an earlier signal |
+| `untrackedDatabase` | `UntrackedDatabase` | `REFUSE` | What happens when the database has collections (other than godwit's two and `system.*`), no godwit history, and nothing was adopted | a database whose migrations are safe to repeat: `RUN_ALL`, rarely |
+| `adoptApplied` | `((MongoDatabase) -> Set<String>)?` | `null` | Returns the ids already applied, to adopt a database migrated by another tool or by hand. Called under the lock, on a start that has work due, while history holds nothing but `ADOPTED` documents, so possibly more than once: it must only read | while databases are adopted; see [adopting-an-existing-database.md](adopting-an-existing-database.md) |
+| `slowTransactionWarning` | `Duration` | `20.seconds` | A transaction attempt slower than this logs `Slow transaction` when it returns or throws | the server's transaction lifetime differs from 60 s, or you want an earlier signal |
 | `holder` | `String` | `<hostname>/<pid>` | Names this process in the lock document, in history documents and in log lines | you want the pod and the release in them |
 
 The enums:
@@ -71,7 +71,7 @@ val defaults = GodwitConfig(
 )
 ```
 
-The default `holder` is `<hostname>/<pid>`, taken from the `HOSTNAME` environment variable when it is set and from the host name otherwise. In Kubernetes `HOSTNAME` is the pod name, so the default is already `shop-7f9c4/1`. It is informational: correctness uses a random token per lock acquisition, not the holder.
+The default `holder` is `<hostname>/<pid>`, taken from the `HOSTNAME` environment variable when it is set, from the host name otherwise, and `unknown-host` when the host name lookup fails. In Kubernetes `HOSTNAME` is the pod name, so the default is already `shop-7f9c4/1`. It is informational: correctness uses a random token per lock acquisition, not the holder.
 
 ## `LockConfig`
 
@@ -216,14 +216,17 @@ These are not configurable. Each protects a guarantee, or is not worth a knob.
 
 | Setting | Value | Why it is fixed |
 |---|---|---|
-| Transaction options | snapshot read concern, majority write concern, reads from the primary | the history record and the data commit atomically only with majority writes, and a snapshot read needs the primary; another value breaks the exactly-once guarantee |
+| Transaction options | snapshot read concern, majority write concern, reads from the primary | the history record and the data it describes survive a failover together only with majority writes, the step's reads are one consistent view only under snapshot, and a transaction reads from the primary; another value breaks the exactly-once guarantee |
 | Bookkeeping collections | majority read and write concern, primary reads, the driver's default codec registry | a lock acquired with `w:1` can be rolled back on failover and leave two holders; an app's custom codecs must not reach godwit's own documents |
 | Lock operation timeout | 5 s on the client for every lock operation | a stalled majority must not hold the heartbeat past the lease |
 | Lock polling | 250 ms to 5 s with jitter; the holder is logged every 10 s | `waitTimeout` is the one knob that matters |
 | Failure policy | stop at the first failure, no skip, no `failFast = false` | later migrations assume earlier ones |
 | Rollback | none: godwit rolls forward only | transactions undo what they wrote; `markApplied` is the one escape hatch |
 | Transaction retry window | 120 s, the driver's | `withTransaction` owns the retry loop |
-| Server transaction lifetime | 60 s, the server's `transactionLifetimeLimitSeconds` | error guidance and the default `slowTransactionWarning` assume it |
+| Transaction lifetime the guidance assumes | 60 s, the server's default `transactionLifetimeLimitSeconds` | the lifetime guidance line needs an attempt that ran at least 60 s, so a `NoSuchTransaction` after a short attempt, which has another cause, gets none; the default `slowTransactionWarning` assumes it too |
+| Pause between runs of a transaction body | 5 ms before the second run, growing by half each time to at most 500 ms, with jitter | driver 5.7.0 runs the body again at once; the pause keeps a conflicting retry out of a tight loop |
+| `Retrying transaction` lines | the first retry of a transaction, then at most one every 10 s | a retry storm stays readable; `transactionRetries` counts every retry |
+| `ensureSearchIndex` polling | every second while `awaitReady` lasts, with `checkLock()` between polls in a step | a search index takes seconds to minutes to build, so a one-second poll adds little delay and little load |
 | Batch size range | 1 to 10,000, per migration | declared with `inBatches(...)`, validated by `validateMigrations` |
 | Id format | `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` | the id is the `_id` of the history document |
 | `lastError` stack trace | capped at 8 KB | history stays small |
@@ -255,13 +258,13 @@ dependencies {
 }
 ```
 
-A start with one pending once-only migration logs, at `INFO` (the every-start migration `bootstrap-customers` logs its own `Running migration` and `Applied migration` lines too; they are left out here):
+The first start of the release that adds `004-order-status`, on a database that has applied `001` to `003` and `reference-countries`, logs, at `INFO` (the every-start migration `bootstrap-customers` logs its own `Running migration` and `Applied migration` lines too; they are left out here):
 
 ```text
 INFO  godwit - Acquired migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f lockWaitMs=212
 INFO  godwit - Running migration id=004-order-status kind=ONCE steps=[IN_TRANSACTION] attempt=1
 INFO  godwit - Applied migration id=004-order-status kind=ONCE steps=[IN_TRANSACTION] attempts=1 txRetries=0 batches=0 durationMs=84 ordersPaid=1200 ordersPending=37
-INFO  godwit - Migrations complete runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f ran=2 recorded=0 upToDate=6 lockWaitMs=212 durationMs=402
+INFO  godwit - Migrations complete runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f ran=2 recorded=0 upToDate=4 lockWaitMs=212 durationMs=402
 ```
 
 A start with nothing pending logs one line and takes no lock, when the list has no every-start migration. This is the shop's list without `bootstrap-customers`; with it, every start takes the lock and runs `bootstrap-customers` ([locking.md](locking.md#the-fast-path-no-lock-when-nothing-is-due)):
@@ -270,7 +273,7 @@ A start with nothing pending logs one line and takes no lock, when the list has 
 INFO  godwit - Migrations up to date runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f checked=7 durationMs=6
 ```
 
-Set the logger to `DEBUG` for one `Committed batch` line per page of an `inBatches` step. The full catalogue of messages and their keys is in [history-and-reports.md](history-and-reports.md).
+Set the logger to `DEBUG` for one `Committed batch` line per committed page of an `inBatches` step that held documents. The full catalogue of messages and their keys is in [history-and-reports.md](history-and-reports.md).
 
 ### What to alert on
 
@@ -285,7 +288,20 @@ Set the logger to `DEBUG` for one `Committed batch` line per page of an `inBatch
 | `WARN` | `Lock renewal failed` | a heartbeat renewal threw; the run keeps the lock until its local deadline. Repeated lines point at the network or the replica set |
 | `WARN` | `Lost migration lock` | the run lost the lock (`reason=NOT_OWNER` or `DEADLINE_PASSED`) and stops at its next check with `LockLostException` |
 | `WARN` | `Lock release failed` | the release threw; the lease ends on its own, and the next start waits at most one lease |
-| `ERROR` | `Migration failed` | a migration failed; the process stops and the next start retries |
+| `ERROR` | `Migration failed` | a migration failed, or its run lost the lock; the process stops and the next start retries |
+| `INFO` | `Waiting for migration lock` | another process holds the lock (`holder`, `holderRunId`). A `waitedMs` that keeps growing, or the line on every start, means a long migration or a holder that is stuck |
+
+Some failures stop `migrate` with no godwit line of their own: `InvalidMigrationsException` (the list),
+`PlanConflictException` (out of order, a partial squash, `UnknownApplied.FAIL`), `UntrackedDatabaseException`,
+`TransactionsUnsupportedException`, `LockTimeoutException`, an exception from the `adoptApplied` hook, and a driver
+exception from godwit's own reads and writes (no primary, for example); `requireUpToDate` throws
+`PendingMigrationsException` the same way. Each one reaches the code that called godwit. Log it there, as
+[failure and recovery](failure-and-recovery.md#using-it) does for `MigrationFailedException`, and alert on a process
+that exits with an error or restarts in a loop.
+
+Between deploys, a history document whose `state` stays other than `APPLIED` is a migration that keeps failing or was
+interrupted; the first query in [querying history](history-and-reports.md#querying-history-from-the-mongo-shell) lists
+them.
 
 The driver logs separately, under `org.mongodb.driver`.
 
@@ -350,7 +366,7 @@ Each case gives the state, what godwit does, and what you do.
 ### `slowTransactionWarning` above the server's limit
 
 - **State:** `slowTransactionWarning = 90.seconds`, and the server aborts transactions after 60 s.
-- **godwit:** no attempt is ever slower than 60 s, because the server aborts it first. The warning never fires.
+- **godwit:** an attempt slower than 60 s cannot commit, because the server aborts its transaction at 60 s. The warning fires only for attempts that fail anyway, never as an early signal.
 - **You:** keep it below the transaction lifetime (the default is 20 s). Raise it only when the server's `transactionLifetimeLimitSeconds` is raised.
 
 ### Two instances with the same `holder`

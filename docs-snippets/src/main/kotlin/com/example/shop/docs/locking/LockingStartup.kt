@@ -22,20 +22,19 @@ private val log = LoggerFactory.getLogger("shop")
  */
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
-        val godwit = Godwit(
-            client,
-            config.mongo.database,
-            GodwitConfig(lock = LockConfig(waitTimeout = 15.minutes))
-        )
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val godwit = Godwit(
+        client,
+        config.mongo.database,
+        GodwitConfig(lock = LockConfig(waitTimeout = 15.minutes))
+    )
 
-        val report = godwit.migrate(shopMigrations(config, customers, identity))
-        log.info("Migrated: ran={} lockWait={}", report.ran.map { it.id }, report.lockWait)
+    val report = godwit.migrate(shopMigrations(config, customers, identity))
+    log.info("Migrated: ran={} lockWait={}", report.ran.map { it.id }, report.lockWait)
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }

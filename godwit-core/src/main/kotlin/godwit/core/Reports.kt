@@ -63,7 +63,10 @@ class MigrationOutcome internal constructor(
 
 /** What one [Godwit.migrate] call did. The "Migrations complete" log line carries the same numbers. */
 class MigrationReport internal constructor(
-    /** A UUID per call, in its log lines and in every history document it writes. */
+    /**
+     * A UUID per call: in every history document it writes, in its lock lines, and in its "Migrations up to date" or
+     * "Migrations complete" line. The lines about one migration carry its `id` instead.
+     */
     val runId: String,
     /** Migrations that ran, in run order. */
     val ran: List<MigrationOutcome>,

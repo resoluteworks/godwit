@@ -46,12 +46,17 @@ What godwit does when it runs it:
 4. Calls `checkLock()` and reads the migration's history document through the session, so the transaction's first
    command is godwit's own (see "Catching a forgotten session in tests"), then runs the body with a new
    `TransactionScope` (its `session`, its `attempt`, empty counters).
-5. Calls `checkLock()` again and sets the history document to APPLIED with the counters, through the same session.
-   That update matches only a document that is still RUNNING with this run's `owner`; when it matches nothing, godwit
+5. Calls `checkLock()` again, checks that the session still runs the transaction godwit opened (see "A service starts
+   its own transaction"), and sets the history document to APPLIED with the counters, through the same session. That
+   update matches only a document that is still RUNNING with this run's `owner`; when it matches nothing, godwit
    aborts the transaction.
 6. The driver commits. The orders and the APPLIED record become visible at the same moment.
 
 Until the commit, every other reader sees the old orders and a RUNNING record; after it, the new orders and APPLIED.
+On a sharded cluster where the history and the orders live on different shards, the commit reaches the shards one
+after another, and a reader outside the transaction can see APPLIED on one shard and the old orders on another while
+it runs. Readers that need the all-at-once view there read with snapshot read concern or in a causally consistent
+session.
 When the process dies before the commit, the server discards the transaction, the record stays RUNNING, and the next
 start runs the migration again. When it dies after the commit, the next start finds APPLIED and skips it.
 
@@ -126,10 +131,10 @@ fun orderPaymentStatusEscaping(gateway: PaymentGateway): Migration = migration("
             .toMap()
     }
     .inTransaction { statuses ->
-        val orders = collection("orders")
-        statuses.forEach { (orderId, status) ->
-            orders.updateOne(eq("_id", orderId), set("paymentStatus", status.name)) // no session
+        val updates = statuses.map { (orderId, status) ->
+            UpdateOneModel<Document>(eq("_id", orderId), set("paymentStatus", status.name))
         }
+        if (updates.isNotEmpty()) collection("orders").bulkWrite(updates) // no session
         count("ordersUpdated", statuses.size)
     }
 ```
@@ -220,9 +225,11 @@ fun clientWithEscapeDetector(uri: String): MongoClient = MongoClient.create(
 )
 ```
 
-The detector sees only the code paths a test runs, and only commands sent from the thread that runs the step. Work a
-service hands to another thread is not checked, and it is outside the transaction anyway: a `ClientSession` serves one
-thread at a time.
+The detector sees only the code paths a test runs, and only commands sent from the thread that runs the step. A
+`ClientSession` can be used from another thread, one thread at a time, so work a service hands to another thread is in
+the transaction when it is given the session, and escapes when it is not. The detector checks neither: a call on
+another thread that forgets the session commits on its own and the test still passes. Keep the step's driver calls
+on the step's thread, or review the threaded ones by hand.
 
 ## Retries: the body can run more than once
 
@@ -241,8 +248,8 @@ On every new run of the body, godwit:
 - pauses first: 5 ms before the second run, growing by half each time to at most 500 ms, with jitter, because driver
   5.7.0 starts the next run at once and a run that conflicts with a document another transaction holds would
   otherwise retry in a tight loop;
-- builds a new `TransactionScope` whose `attempt` is one higher (it is 1 on the first run; a commit retry does not
-  change it);
+- builds a new `TransactionScope` whose `attempt` is one higher (it is 1 on the first run; a retry of the commit alone
+  does not change it);
 - resets the step's counters, so `count(...)` reports the work that committed and nothing from aborted attempts;
 - adds one to `transactionRetries`, which history and `MigrationOutcome` report, and logs a WARN for the first retry
   of the transaction and then at most every 10 s. Its `error` is the code name and code of the error the previous
@@ -255,9 +262,10 @@ WARN  godwit - Retrying transaction id=004-order-status attempt=2 error=WriteCon
 INFO  godwit - Applied migration id=004-order-status kind=ONCE steps=[IN_TRANSACTION] attempts=1 txRetries=1 batches=0 durationMs=131 ordersPaid=1200 ordersPending=37
 ```
 
-`attempt` on "Running migration" counts runs of the migration (1 unless an earlier run failed); `attempt` on "Retrying
-transaction" counts runs of the body within this run. Read `TransactionScope.attempt` in a log line of your own when you
-want the second number from inside the step, for example `log.atDebug().addKeyValue("attempt", attempt).log(...)`.
+`attempt` on "Running migration" counts runs of the migration (1 unless earlier runs failed or were interrupted);
+`attempt` on "Retrying transaction" counts runs of the body within this run. Read `TransactionScope.attempt` in a log
+line of your own when you want the second number from inside the step, for example
+`log.atDebug().addKeyValue("attempt", attempt).log(...)`.
 
 The retry rolls back everything the body did through `session`. Nothing else is rolled back:
 
@@ -297,14 +305,17 @@ import com.mongodb.client.model.Filters.and
 import com.mongodb.client.model.Filters.eq
 import com.mongodb.client.model.Filters.exists
 import com.mongodb.client.model.Filters.ne
+import com.mongodb.client.model.UpdateOneModel
 import com.mongodb.client.model.Updates.set
 import godwit.core.Migration
 import godwit.core.migration
+import org.bson.Document
 
 /**
  * Stores the payment gateway's status on every order that has a payment. The gateway calls run outside any
  * transaction, one per order; they only read, so a retry repeats them harmlessly. The statuses reach the transaction
- * as the outside step's value.
+ * as the outside step's value, and the transaction writes them in one bulk write: a round trip per batch of updates,
+ * not per order, so tens of thousands of orders stay well inside the transaction lifetime.
  */
 fun orderPaymentStatus(gateway: PaymentGateway): Migration = migration("009-order-payment-status")
     .outsideTransaction {
@@ -318,10 +329,10 @@ fun orderPaymentStatus(gateway: PaymentGateway): Migration = migration("009-orde
             .toMap()
     }
     .inTransaction { statuses ->
-        val orders = collection("orders")
-        statuses.forEach { (orderId, status) ->
-            orders.updateOne(session, eq("_id", orderId), set("paymentStatus", status.name))
+        val updates = statuses.map { (orderId, status) ->
+            UpdateOneModel<Document>(eq("_id", orderId), set("paymentStatus", status.name))
         }
+        if (updates.isNotEmpty()) collection("orders").bulkWrite(session, updates)
         count("ordersUpdated", statuses.size)
     }
 ```
@@ -337,23 +348,28 @@ godwit never stores the value. The outside step runs at least once, so its calls
 
 ## Transaction lifetime: 60 seconds
 
-The server aborts any transaction open longer than `transactionLifetimeLimitSeconds`, 60 by default. The body's next
-operation then fails with `NoSuchTransaction` (251), which is labelled transient, so the driver runs the body again;
-that attempt runs out of time as well, and the driver gives up when its 120 s window ends. godwit fails the migration
-with `MigrationFailedException`, and the message says the transaction passed its lifetime and that the work belongs in
-`inBatches` or an outside step. The migration fails the same way on every start until the code changes. godwit does not
-change the server's limit; Atlas exposes it in the cluster's advanced configuration, and raising it only moves the
-wall.
+The server aborts any transaction open longer than `transactionLifetimeLimitSeconds`, 60 by default. What the body
+sees depends on what runs at that moment. An operation still running, such as a long `updateMany` or a read that scans
+past the limit, is interrupted with `TransactionExceededLifetimeLimitSeconds` (290), which is not labelled transient:
+the driver does not run the body again, and the migration fails on its first attempt, about 60 s in. When the limit
+falls between two operations, the next one fails with `NoSuchTransaction` (251), which is labelled transient, so the
+driver runs the body again; that attempt runs out of time as well, and the driver gives up when its 120 s window ends.
+Either way godwit fails the migration with `MigrationFailedException`, and the message says the transaction passed its
+lifetime and that the work belongs in `inBatches` or an outside step. The migration fails the same way on every start
+until the code changes. godwit does not change the server's limit; Atlas exposes it in the cluster's advanced
+configuration, and raising it only moves the wall.
 
-godwit warns well before the limit. An attempt slower than `GodwitConfig.slowTransactionWarning` (20 s by default)
-logs:
+godwit flags transactions that come close. An attempt that took longer than `GodwitConfig.slowTransactionWarning` (20 s
+by default) logs this line when it returns or throws, so a step that commits in 23 s on staging shows up before a
+larger production database takes it past the limit:
 
 ```text
 WARN  godwit - Slow transaction id=004-order-status attempt=1 durationMs=23410
 ```
 
 This step (a fragment: the `inTransaction` step of a migration) updates every order one at a time in one transaction.
-With a few thousand orders it commits; with two million it never does:
+Each `updateOne` is a round trip, and every one of them counts against the lifetime. With a few thousand orders it
+commits; with two million it never does:
 
 ```kotlin
 .inTransaction {
@@ -363,6 +379,9 @@ With a few thousand orders it commits; with two million it never does:
     }
 }
 ```
+
+A `bulkWrite` of `UpdateOneModel`s, as the shop's `009` uses, sends a batch of updates per round trip and fits far more
+into one transaction; past that, the work belongs elsewhere.
 
 Where long work goes instead:
 
@@ -378,8 +397,8 @@ MongoDB allows little DDL in a transaction: creating an index on an existing col
 `renameCollection` and `collMod` all fail, and explicit `createCollection` and `createIndexes` need read concern
 `local`, which godwit's transactions do not use. All DDL belongs in the outside step.
 
-godwit's DDL helpers are members of the outside step's scope only, so they do not resolve in a transactional step. The
-fragment below is a migration's `inTransaction` step that calls one.
+godwit's DDL helpers, called unqualified, are members of the outside step's scope only, so they do not resolve in a
+transactional step. The fragment below is a migration's `inTransaction` step that calls one.
 
 This does not compile:
 
@@ -403,7 +422,8 @@ The server rejects it: `createIndexes` refuses a transaction whose read concern 
 (`OperationNotSupportedInTransaction`, 263). godwit records the migration FAILED and throws
 `MigrationFailedException`, whose message says to move the call to `outsideTransaction`. Without `session` the call
 escapes instead: the index is built outside the transaction, is not rolled back, and can wait behind the transaction's
-own locks.
+own locks. The helpers' extension forms (`database.ensureCollection(...)`, `collection(...).dropIndexIfExists(...)`)
+compile in a transactional step too; they take no session, so they escape the same way.
 
 Implicit collection creation is allowed: an insert or upsert into a collection that does not exist creates it inside
 the transaction, under any read concern. `reference-countries` creates `countries` that way on a fresh database. When a
@@ -413,17 +433,19 @@ collection needs options or indexes, create it with `ensureCollection` in an out
 
 A transaction keeps every document it writes in the storage engine's cache until it commits. One that does not fit
 fails: under cache pressure the server aborts it with a write conflict, which the driver retries and which fails the
-same way again, or with `TransactionTooLargeForCache` (388), which the driver does not retry. godwit fails the migration
-with the same guidance as for the lifetime. Split the work with `inBatches`, and lower `batchSize` when one page is too
-large.
+same way again until the 120 s window ends, or with `TransactionTooLargeForCache` (388), which the driver does not
+retry. godwit fails the migration with `MigrationFailedException`. For `TransactionTooLargeForCache` its message says
+the transaction was too large for the storage engine's cache and gives the same advice as for the lifetime; a failure
+that ends in a write conflict gets no guidance line. Split the work with `inBatches`, and lower `batchSize` when one
+page is too large.
 
 ## One MongoClient
 
 A session belongs to the client that started it. godwit starts its sessions on the `MongoCluster` passed to `Godwit`,
-and the driver rejects such a session in an operation on any other client's collection with `IllegalStateException:
-ClientSession from same MongoClient`. godwit fails the migration with the guidance line "The step passed godwit's
-session to an operation on another MongoClient. Build Godwit and the services the migrations call from the same
-MongoClient." ([architecture](architecture.md#error-guidance)).
+and the driver rejects such a session in an operation on any other client's collection with an `IllegalStateException`
+whose message is `state should be: ClientSession from same MongoClient`. godwit fails the migration with the guidance
+line "The step passed godwit's session to an operation on another MongoClient. Build Godwit and the services the
+migrations call from the same MongoClient." ([architecture](architecture.md#error-guidance)).
 
 The shop builds `Godwit` and every service from one client:
 
@@ -439,16 +461,15 @@ import godwit.core.Godwit
 
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
 
-        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
+    Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity))
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 
 /** The rest of the shop: serves requests until the process stops. */
@@ -470,15 +491,20 @@ fun startWithTwoClients() {
 }
 ```
 
-`001-initial-setup` to `004-order-status` apply. `005-customer-external-ids` runs its outside step (no session, so
-either client works), then passes the transaction's session from `godwitClient` to `CustomerService`, which runs on
-`appClient`, and fails. In tests, build services from `TestGodwit.database` or `TestGodwit.client`, which share the
-client of `TestGodwit.godwit`.
+On a database at `004-order-status` whose customers are not linked yet, `005-customer-external-ids` runs its outside
+step (no session, so either client works), then passes the transaction's session from `godwitClient` to
+`CustomerService`, which runs on `appClient`, and fails. On a new database, `001-initial-setup` to `006-order-totals`
+and `reference-countries` use only their scope's `collection(...)`, which comes from `godwitClient`, so they apply;
+`005` has no customer to link there, so its transaction calls no service. `bootstrap-customers` then passes `session`
+to `CustomerService.ensureCustomer` for each seed customer and fails the same way. In tests, build services from
+`TestGodwit.database` or `TestGodwit.client`, which share the client of `TestGodwit.godwit`.
 
 ## Standalone servers
 
-A standalone `mongod` has no transactions. godwit checks the server before it takes the lock, and only when a
-migration with a transactional step (`inTransaction` or `inBatches`) is due:
+A standalone `mongod` has no transactions. godwit asks the server (`hello`, sent at most once per call) before it takes
+the lock, and only when a migration with a transactional step (`inTransaction` or `inBatches`) is due. The plan made
+under the lock is checked the same way, so a transactional step that became due while this process waited (another
+process changed history) is caught there:
 
 - when one is due, `migrate` throws `TransactionsUnsupportedException` naming every due migration that needs
   transactions, and nothing runs, not even the outside-only migrations due with them;
@@ -514,13 +540,16 @@ godwit sets these itself; none is configurable:
 |---|---|---|---|
 | A transactional step: `inTransaction`, each `inBatches` page, with the APPLIED flip and checkpoint written in it | `snapshot` | `majority` | primary |
 | History reads: planning, `status()`, `history()` | `majority` | n/a | primary |
-| History writes outside a transaction: RUNNING, FAILED, the APPLIED flip of an outside-only migration | n/a | `majority` | primary |
+| History writes outside a transaction: RUNNING, FAILED, the APPLIED flip of an outside-only migration, a recorded squash or mark | n/a | `majority` | primary |
+| Adoption's records: one transaction on a replica set, one write per id on a standalone server | `snapshot` in the transaction | `majority` | primary |
 | Lock operations | `majority` | `majority` | primary |
 | The outside step | your client's settings | your client's settings | your client's settings |
 
-Snapshot read concern gives the body one consistent view of the database as of its first operation, and a majority
-commit makes that view and the commit survive a failover. The outside step is ordinary driver code on `database`, so it
-uses whatever your client configures.
+Snapshot read concern gives the body one consistent view of the database as of the transaction's first command
+(godwit's read of the history document), and a majority commit makes that view and the commit survive a failover. The
+outside step is ordinary driver code on `database`, so it uses whatever your client configures; with `w:1`, its writes
+can be rolled back by a failover after the migration is recorded APPLIED, so give them majority write concern
+([outside-transaction steps](outside-transaction-steps.md#an-outside-step)).
 
 ## Edge cases
 
@@ -624,15 +653,15 @@ from the database after `migrate` returns.
 A service method the step calls runs `session.withTransaction { ... }` or `session.startTransaction()` on the session
 it was given, or ends godwit's transaction with `session.commitTransaction()` or `session.abortTransaction()`.
 
-godwit: the session already carries godwit's transaction, so starting one makes the driver throw
-`IllegalStateException` ("Transaction already in progress"), and the migration fails in `IN_TRANSACTION`. A commit or
-abort ends godwit's transaction early: an abort rolls back the step's writes so far, and a commit makes them permanent
-apart from the history record. Before its `APPLIED` record, or an `inBatches` page's checkpoint, godwit checks that the
-session still runs the transaction it opened. It does not, so godwit throws `IllegalStateException` ("The step ended
-godwit's transaction on its session") and the migration fails in its transactional step and is recorded `FAILED`;
-the writes the commit made stay. A commit followed by `session.startTransaction()` fails the same way. In a test,
-`SessionEscapeDetector` reads the commit or abort as the end of the step's transaction and checks nothing after it;
-this failure is what the test sees.
+godwit: the session already carries godwit's transaction, so starting one makes the driver throw `IllegalStateException`
+("Transaction already in progress"), and the migration fails in its transactional step. A commit or abort ends godwit's
+transaction early: an abort rolls back the step's writes so far, and a commit makes them permanent apart from the
+history record. Before its `APPLIED` record, or an `inBatches` page's checkpoint, godwit checks that the session still
+runs the transaction it opened. It does not, so godwit throws `IllegalStateException` ("The step ended godwit's
+transaction on its session") and the migration fails in its transactional step and is recorded `FAILED`; the writes the
+commit made stay. A commit followed by `session.startTransaction()` fails the same way. In a test,
+`SessionEscapeDetector` reads the commit or abort as the end of the step's transaction and checks nothing after it; this
+failure is what the test sees.
 
 You: give services plain operations that take a session, as the shop's services do, and let the caller own the
 transaction. A service must never commit, abort or start a transaction on a session it was given.
@@ -642,8 +671,10 @@ transaction. A service must never commit, abort or start a transaction on a sess
 The body aggregates a year of orders to compute per-customer totals, then writes a few hundred documents. The
 aggregation takes 50 s.
 
-godwit: the read counts toward the 60 s lifetime like any write. godwit logs "Slow transaction" after 20 s, and the
-transaction exceeds its lifetime and fails.
+godwit: the read counts toward the 60 s lifetime like any write, so the writes have the last 10 s, and a little more
+data puts the transaction past its lifetime: it fails as described above. Each attempt over 20 s logs
+"Slow transaction" when it ends, so a database where the migration still commits shows the line before a larger one
+fails.
 
 You: run the aggregation in the outside step and hand the totals to `inTransaction`, which then only writes.
 

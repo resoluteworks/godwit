@@ -1,4 +1,4 @@
-// expect: Unresolved reference 'outsideTransaction' on receiver of type 'Migration'
+// expect: Unresolved reference 'outsideTransaction' on receiver of type 'Migration'.
 // docs/declaring-migrations.md: the outside step comes first; data then schema is two migrations.
 package neg
 

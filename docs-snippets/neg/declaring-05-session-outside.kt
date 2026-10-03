@@ -1,4 +1,4 @@
-// expect: Unresolved reference 'session'
+// expect: Unresolved reference 'session'.
 // docs/declaring-migrations.md: an outside step has no session.
 package neg
 

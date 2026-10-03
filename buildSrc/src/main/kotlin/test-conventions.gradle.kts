@@ -38,10 +38,17 @@ tasks.test {
     dependsOn("lintKotlin")
     finalizedBy("jacocoTestReport")
     // Some specs read the docs and the KDoc of the main sources, which they keep in step with the code (the log
-    // catalogue, the guidance lines). A change to either, a KDoc-only one included, runs the specs again.
+    // catalogue, the guidance lines, every output the docs quote, the compiler errors the neg/ snippets expect). A
+    // change to any of them, a KDoc-only one included, runs the specs again.
     inputs.dir(rootProject.layout.projectDirectory.dir("docs"))
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .withPropertyName("docs")
+    inputs.file(rootProject.layout.projectDirectory.file("README.md"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .withPropertyName("readme")
+    inputs.dir(rootProject.layout.projectDirectory.dir("docs-snippets/neg"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .withPropertyName("negSnippets")
     inputs.dir(layout.projectDirectory.dir("src/main/kotlin"))
         .withPathSensitivity(PathSensitivity.RELATIVE)
         .withPropertyName("mainSources")

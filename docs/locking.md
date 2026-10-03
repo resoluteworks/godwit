@@ -53,22 +53,21 @@ private val log = LoggerFactory.getLogger("shop")
  */
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
-        val godwit = Godwit(
-            client,
-            config.mongo.database,
-            GodwitConfig(lock = LockConfig(waitTimeout = 15.minutes))
-        )
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val godwit = Godwit(
+        client,
+        config.mongo.database,
+        GodwitConfig(lock = LockConfig(waitTimeout = 15.minutes))
+    )
 
-        val report = godwit.migrate(shopMigrations(config, customers, identity))
-        log.info("Migrated: ran={} lockWait={}", report.ran.map { it.id }, report.lockWait)
+    val report = godwit.migrate(shopMigrations(config, customers, identity))
+    log.info("Migrated: ran={} lockWait={}", report.ran.map { it.id }, report.lockWait)
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 ```
 
@@ -121,7 +120,7 @@ After the run releases it, the document stays, with the lease ended at the relea
 | `_id` | The history collection's name. Two `Godwit` configurations with different history collections have different locks. |
 | `owner` | A random UUID per acquisition: the owner token. History documents written under the lock carry it too, which is how a run that lost the lock is fenced out (see [Losing the lock mid-run](#losing-the-lock-mid-run)). |
 | `holder` | `GodwitConfig.holder`, `<hostname>/<pid>` by default. Diagnostics only. |
-| `runId` | The `MigrationReport.runId` of the holding call. Every log line and history document that call writes carries it. |
+| `runId` | The `MigrationReport.runId` of the holding call. Every history document that call writes carries it, and so do its lock lines and its `Migrations complete` line. |
 | `acquiredAt`, `refreshedAt`, `expiresAt`, `releasedAt` | Server times (`$$NOW`). The lock is free when `expiresAt` is at or before the server's current time. |
 
 The lock is free when its document is missing, when `expiresAt` has passed, or after a release (which sets `expiresAt`
@@ -131,7 +130,8 @@ to the release time). Nothing ever deletes the document; it always shows the las
 ## The fast path: no lock when nothing is due
 
 Every `migrate` call starts by reading the history collection (majority read concern, primary). When no migration is
-due, it returns at once: no lock, no writes, one log line, `report.lockWait == null`.
+due and no squash is waiting to be recorded, it returns at once: no lock, no writes, one INFO line (after the
+`Unknown applied migrations` warning when history holds ids the list does not know), `report.lockWait == null`.
 
 ```text
 INFO  godwit - Migrations up to date runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f checked=7 durationMs=6
@@ -146,7 +146,7 @@ What is due:
 | Kind | Due when | Effect on the fast path |
 |---|---|---|
 | once-only (`migration(id)`) | no history document, or one that is not `APPLIED` | none: a start skips the lock once it has applied |
-| repeatable (`repeatable(id, revision)`) | not `APPLIED`, or the stored `revision` differs | none: a start at the same revision skips the lock |
+| repeatable (`repeatable(id, revision)`) | under `Target.Latest`: no history document, one that is not `APPLIED`, a stored `revision` that differs, or one a run of another kind applied (the id changed kind) | none: a start at the same revision skips the lock |
 | every-start (`everyStart(id)`) | always, under `Target.Latest` | a list that contains one takes the lock on every start |
 
 The shop's list ends with `bootstrap-customers`, an every-start migration, so every shop start takes the lock, runs that
@@ -180,9 +180,10 @@ A test proves the fast path with the real runner (from godwit-test, see [testing
 When work is due and another process holds the lock, `migrate` waits:
 
 1. It tries to acquire the lock. If the lock is held, it sleeps and tries again: 250 ms, then double each time up to
-   5 s (250 ms, 500 ms, 1 s, 2 s, 4 s, 5 s, 5 s, ...). Every sleep is randomised (jitter), so waiting processes do not
-   poll in lockstep.
-2. Every 10 s it logs the holder at INFO, read from the lock document:
+   5 s (250 ms, 500 ms, 1 s, 2 s, 4 s, 5 s, 5 s, ...). Each sleep is a random time between half and all of that step
+   (jitter), so waiting processes do not poll in lockstep.
+2. Every 10 s it logs the holder at INFO, read from the lock document while its lease lasts (a lease that has just
+   ended, or a lock document that lacks a field godwit writes, logs nothing):
 
    ```text
    INFO  godwit - Waiting for migration lock holder=shop-7f9c4/1 holderRunId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f expiresAt=2026-10-02T10:15:00.210Z waitedMs=10004
@@ -190,9 +191,9 @@ When work is due and another process holds the lock, `migrate` waits:
 
 3. When it acquires the lock, it logs `Acquired migration lock` with `lockWaitMs`, re-reads history and plans again
    (next section).
-4. When `waitTimeout` passes first, it throws `LockTimeoutException` without having written anything. Its `holder` is
-   the process holding the lock at that moment (`null` if the lock was released just as the wait ended) and `waited` is
-   how long it waited.
+4. When `waitTimeout` passes first, it makes a last attempt, then throws `LockTimeoutException` without having
+   written anything. Its `holder` is the process holding the lock at that moment (`null` when the lease ended just as
+   the wait did, or when the lock document lacks a field godwit writes) and `waited` is how long it waited.
 
 A start that gives up should say who it waited for. The exception carries it:
 
@@ -246,7 +247,7 @@ the same second; the database has `001` to `005`, `reference-countries` at its c
 |---|---|---|---|
 | 10:14:00.150 | Reads history: `006-order-totals` and `bootstrap-customers` due | Same | Same |
 | 10:14:00.210 | Acquires the lock, lease until 10:15:00.210 | Acquire fails: held | Acquire fails: held |
-| 10:14:00.230 | Re-reads history: `006` still due. Runs it | Retries after 250 ms, 500 ms, 1 s, 2 s, 4 s, then about every 5 s | Same, different jitter |
+| 10:14:00.230 | Re-reads history: `006` still due. Runs it | Retries after pauses of up to 250 ms, 500 ms, 1 s, 2 s, 4 s, then up to 5 s each | Same, different jitter |
 | 10:14:10.2 | Page 160 | Logs `Waiting for migration lock holder=shop-7f9c4/1 expiresAt=...10:15:00.210Z waitedMs=10004` | Logs the same |
 | 10:14:20.2 | Heartbeat: lease until 10:15:20.214 | Logs `expiresAt=...10:15:20.214Z waitedMs=20011` | Same |
 | 10:14:40.2 | Heartbeat: lease until 10:15:40.214 | Keeps waiting | Keeps waiting |
@@ -306,7 +307,7 @@ each write on a standalone server): a run that lost the lock during a long read 
 
 A holder that dies (OOM kill, `SIGKILL`, a node failure) stops renewing its lease. Nothing releases the lock; the lease
 ends on its own, at most `lease` (60 s) after the last renewal, and the next waiting process acquires it within one
-polling interval (about 5 s) after that.
+polling interval (at most 5 s) after that.
 
 Same deploy, but `shop-7f9c4/1` is OOM-killed at 10:15:10.0, in the middle of page 1050 of `006-order-totals`:
 
@@ -316,8 +317,8 @@ Same deploy, but `shop-7f9c4/1` is OOM-killed at 10:15:10.0, in the middle of pa
 | 10:15:10.0 | `shop-7f9c4/1` dies. Page 1050's transaction is open and uncommitted; pages 1 to 1049 and their checkpoint are committed |
 | 10:15:10 to 10:16:00 | `shop-2b8e1/1` keeps logging `Waiting for migration lock holder=shop-7f9c4/1`, with `expiresAt` stuck at 10:16:00.214. An `expiresAt` that stops moving between two lines means the holder stopped renewing |
 | 10:16:03.1 | `shop-2b8e1/1` acquires the lock, re-reads history: `006-order-totals` is `RUNNING` with a checkpoint after page 1049 |
-| 10:16:03.1 | It logs `WARN Resuming interrupted migration id=006-order-totals attempts=2` and writes its own `RUNNING` marker (its owner token, `attempts: 2`) |
-| 10:16:03.2 | It re-runs the outside step (the `createIndex` is a no-op now) and starts page 1050. The dead process's page 1050 transaction is still open on the server and holds the same orders, so this page's writes conflict (`WriteConflict`, 112) and the driver runs the page again until the server aborts the dead transaction, 60 s after it started (about 10:16:09.9). godwit pauses before each run (5 ms, growing by half each time to 500 ms, with jitter), so the page runs a few dozen times rather than in a tight loop; it logs `Retrying transaction` once, then at most every 10 s, and `transactionRetries` counts every run |
+| 10:16:03.1 | It writes its own `RUNNING` marker (its owner token, `attempts: 2`) and logs `WARN Resuming interrupted migration id=006-order-totals attempts=2` |
+| 10:16:03.2 | It re-runs the outside step (the `createIndex` is a no-op now) and starts page 1050. The dead process's page 1050 transaction is still open on the server and holds the same orders, so this page's writes conflict (`WriteConflict`, 112) and the driver runs the page again until the server aborts the dead transaction, 60 s after it started (about 10:16:09.9). godwit pauses before each run (5 ms, growing by half each time to 500 ms, with jitter), so the page runs a few dozen times rather than in a tight loop; it logs `Retrying transaction` once, then at most every 10 s, and `transactionRetries` counts every run after the first |
 | 10:17:35 | `006` applied: `attempts=2`, `batches=2400` (1049 committed by the first process, 1351 by the second) |
 
 No page is lost or applied twice: each page's writes and checkpoint commit together, so the uncommitted page 1050 left
@@ -325,9 +326,9 @@ nothing behind. A crash inside an outside step leaves partial DDL instead, which
 step is idempotent ([failure-and-recovery.md](failure-and-recovery.md#process-killed-mid-outside-step)).
 
 You can watch this in a test by planting a lock document whose lease ends 10 s from now, as a crashed process leaves
-it. Plant every field godwit writes: a document without `holder`, `runId`, `acquiredAt` or `expiresAt` still holds the
-lock until `expiresAt`, but names no holder, so waiting processes log no `Waiting for migration lock` line and
-`LockTimeoutException.holder` is null.
+it. Plant every field godwit writes: a document without `holder`, `runId` or `acquiredAt` (or with one of another type)
+still holds the lock until `expiresAt`, but names no holder, so waiting processes log no `Waiting for migration lock`
+line and `LockTimeoutException.holder` is null; a document without `expiresAt` does not hold the lock at all.
 
 ```kotlin
 "a start waits for a crashed holder's lease to end, then runs" {
@@ -360,7 +361,8 @@ reach a majority, a stop-the-world pause longer than the lease. godwit detects i
   the time it sent that renewal, plus `lease`, minus `safetyMargin` (60 s − 10 s = 50 s by default). Until the first
   renewal succeeds, the deadline counts from the time it sent the acquire. If no renewal succeeds before it, the lock
   is lost. Because the deadline counts from when the renewal was sent, the holder gives
-  the lock up at least `safetyMargin` before the server lets anyone else take it.
+  the lock up at least `safetyMargin` before the server lets anyone else take it, as long as the primary's clock
+  advances at the rate of the holder's ([clock skew](#clock-skew)).
 
 A renewal that throws (it timed out, or no primary was reachable) does not lose the lock by itself: it logs a warning
 and the next renewal tries again, until the deadline decides. Three WARN lines trace the lock's trouble, each with the
@@ -370,7 +372,7 @@ run's `runId` and `holder`:
 |---|---|---|
 | `Lock renewal failed` | A renewal threw. The run still holds the lock until its local deadline | `error`: the exception's class and message |
 | `Lost migration lock` | A renewal matched no lock document with this run's token, or the local deadline passed. Logged once per run, by the heartbeat thread or by `checkLock()`, whichever notices first | `reason`: `NOT_OWNER` or `DEADLINE_PASSED` |
-| `Lock release failed` | The release in `finally` threw. The lease ends on its own, at most `lease` after the last renewal | `error`: the exception's class and message |
+| `Lock release failed` | The release in `finally` threw, or the thread was interrupted while it stopped the heartbeat. The release is not retried; the lease ends on its own, at most `lease` after the last renewal | `error`: the exception's class and message |
 
 ```text
 WARN  godwit - Lock renewal failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
@@ -426,6 +428,7 @@ that lost the lock can still make it run once more ([architecture](architecture.
 WARN  godwit - Lock renewal failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
 WARN  godwit - Lock renewal failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
 WARN  godwit - Lost migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 reason=DEADLINE_PASSED
+WARN  godwit - Retrying transaction id=006-order-totals attempt=2 error=MongoTimeoutException (-3)
 ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 error=godwit.core.LockLostException: Lost the migration lock while running 006-order-totals
 WARN  godwit - Lock release failed runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...
 ```
@@ -460,7 +463,8 @@ The history document of `006-order-totals` while `shop-7f9c4/1` was running it:
 }
 ```
 
-After `shop-2b8e1/1` took it over (the checkpoint is unchanged; owner, holder, run and attempts are the new run's):
+After `shop-2b8e1/1` took it over (the checkpoint is unchanged; owner, holder, run, `startedAt` and attempts are the
+new run's):
 
 ```json
 {
@@ -552,14 +556,17 @@ The lock is decided by the server's clock, not the clients'.
 - **History timestamps are client times and informational.** `startedAt` and `finishedAt` come from the clock of the
   process that wrote them. With that 3-minute skew, the pod records `006-order-totals` as finished at 10:13:31 on a
   deploy that started at 10:14:00. `durationMs` is measured on the monotonic clock and stays correct.
-- **The server's clock can jump on failover.** After an election, `$$NOW` is the new primary's clock. If it runs 4 s
+- **The server's clock can jump forward.** After an election, `$$NOW` is the new primary's clock. If it runs 4 s
   ahead of the old primary's, every lease ends 4 s earlier than the holder expects; the 10 s `safetyMargin` absorbs it.
-  Skew larger than `safetyMargin` can let a waiting process take the lock while the holder still believes it holds it.
+  The same primary's clock stepping forward (an NTP correction, a manual change) shortens every live lease the same
+  way, with no election. A jump larger than `safetyMargin` can let a waiting process take the lock while the holder
+  still believes it holds it.
   The owner-token fence still keeps transactional work to one commit, but outside steps could run in both processes at
   once. Idempotent calls repeated one after another converge; calls that overlap (a long server-side update, two
   creates at an external service) need the measures in
   [outside-transaction steps](outside-transaction-steps.md#long-outside-steps-and-checklock). Run NTP on every replica
-  set member; MongoDB expects synchronised clocks for replication anyway.
+  set member, configured to slew the clock rather than step it; MongoDB expects synchronised clocks for replication
+  anyway.
 
 ## Why there is no TTL index
 
@@ -664,14 +671,14 @@ The message is "heartbeat must be positive and below lease minus safetyMargin". 
 **Someone deletes the lock document during a run.**
 `shop-7f9c4/1` holds the lock; an operator deletes `godwit-lock`'s document to "unstick" a deploy. The next renewal
 matches nothing, the holder marks the lock lost (`WARN Lost migration lock reason=NOT_OWNER`) and fails its run with
-`LockLostException` at its next check, and any waiting process acquires a fresh lock at once (the acquire upsert
-recreates the document). The fence keeps the transactional work safe, but the run is wasted and restarts. Never delete
-or edit the lock document. A lock that looks stuck either belongs to a live run (look at `refreshedAt`: it moves every
-20 s) or frees itself within 60 s.
+`LockLostException` at its next check, and a waiting process acquires a fresh lock at its next attempt (the acquire
+upsert recreates the document), possibly before the holder's next renewal finds out. The fence keeps the transactional
+work safe, but the run is wasted and restarts. Never delete or edit the lock document. A lock that looks stuck either
+belongs to a live run (look at `refreshedAt`: it moves every 20 s) or frees itself within 60 s.
 
 **Someone sets `expiresAt` far in the future by hand.**
-Every start waits `waitTimeout` and fails, until that time. Fix the document (set `expiresAt` to now) and leave it alone
-afterwards.
+Every start with work due waits `waitTimeout` and fails, until that time; a start with nothing due takes the fast path
+and is unaffected. Fix the document (set `expiresAt` to now) and leave it alone afterwards.
 
 **Two apps, or two configurations, in one database.**
 The lock's `_id` is the history collection's name. A shop and a separate admin app that keeps its own history in
@@ -697,9 +704,9 @@ nothing due takes the fast path and starts at once; the lock is irrelevant to it
 It never acquired the lock and has written nothing. The holder and the other waiting processes are unaffected.
 
 **A database user without write access to `godwit-lock`.**
-The first acquire fails with the server's `Unauthorized` error (13), which godwit does not wrap: driver errors from its
-own lock and history operations propagate unchanged. Grant the app's user `readWrite` on the database, or at least on
-`godwit-lock` and `godwit-history` (or the names you configured).
+The first acquire of a start with work due fails with the server's `Unauthorized` error (13), which godwit does not
+wrap: driver errors from its own lock and history operations propagate unchanged. Grant the app's user `readWrite` on
+the database, or at least on `godwit-lock` and `godwit-history` (or the names you configured).
 
 ## Design decisions
 

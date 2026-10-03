@@ -15,7 +15,7 @@ numbers are stable, so a discussion, a commit or a review comment can cite them 
 | [DD-5](#dd-5-an-explicit-session-checked-in-tests) | An explicit `session`, checked in tests | [Transactions and sessions](transactions-and-sessions.md) |
 | [DD-6](#dd-6-flat-global-ids-and-no-migrations-in-libraries) | Flat global ids, and no migrations in libraries | [Ordering and validation](ordering-and-validation.md), [Libraries and modules](libraries-and-modules.md) |
 | [DD-7](#dd-7-out-of-order-migrations-fail-by-default) | Out-of-order migrations fail by default | [Ordering and validation](ordering-and-validation.md) |
-| [DD-8](#dd-8-a-plain-list-validated-before-any-io) | A plain `List<Migration>`, validated before any I/O | [Ordering and validation](ordering-and-validation.md) |
+| [DD-8](#dd-8-a-plain-list-validated-before-any-io) | A plain list, validated before any I/O | [Ordering and validation](ordering-and-validation.md) |
 | [DD-9](#dd-9-wait-for-a-busy-lock-with-a-timeout) | Wait for a busy lock, with a timeout | [Locking](locking.md) |
 | [DD-10](#dd-10-one-history-document-per-migration-updated-in-place) | One history document per migration, updated in place | [History and reports](history-and-reports.md) |
 | [DD-11](#dd-11-roll-forward-only) | Roll forward only | [Failure and recovery](failure-and-recovery.md) |
@@ -34,6 +34,15 @@ numbers are stable, so a discussion, a commit or a review comment can cite them 
 | [DD-24](#dd-24-three-ddl-helpers) | Three DDL helpers | [Outside-transaction steps](outside-transaction-steps.md) |
 | [DD-25](#dd-25-0x-until-proven-in-production) | 0.x until proven in production | [Implementation plan](development/implementation-plan.md) |
 | [DD-26](#dd-26-jvm-21-and-kotlin-24) | JVM 21 and Kotlin 2.4 | [README](../README.md#requirements) |
+| [DD-27](#dd-27-the-lock-is-taken-by-a-conditional-pipeline-upsert) | The lock is taken by a conditional pipeline upsert | [Architecture](architecture.md#lock-operations) |
+| [DD-28](#dd-28-a-conditional-history-upsert-is-sent-once-more-after-a-duplicate-key) | A conditional history upsert is sent once more after a duplicate key | [Architecture](architecture.md#history-writes) |
+| [DD-29](#dd-29-each-step-transaction-opens-with-godwits-own-tagged-read) | Each step transaction opens with godwit's own tagged read | [Architecture](architecture.md#running-one-migration) |
+| [DD-30](#dd-30-a-step-that-ends-godwits-transaction-fails) | A step that ends godwit's transaction fails | [Transactions and sessions](transactions-and-sessions.md#a-service-starts-its-own-transaction) |
+| [DD-31](#dd-31-every-history-and-lock-command-carries-a-godwit--comment) | Every history and lock command carries a `{godwit: ...}` comment | [Architecture](architecture.md#running-one-migration) |
+| [DD-32](#dd-32-a-lost-reply-is-settled-by-a-majority-acknowledged-write) | A lost reply is settled by a majority-acknowledged write | [Architecture](architecture.md#running-one-migration) |
+| [DD-33](#dd-33-a-run-of-another-kind-clears-the-stored-revision) | A run of another kind clears the stored revision | [Repeatable migrations](repeatable-migrations.md#changing-a-migrations-kind) |
+| [DD-34](#dd-34-the-other-type-_id-check-runs-outside-the-transaction) | The other-type `_id` check runs outside the transaction | [Architecture](architecture.md#checkpoint-writes) |
+| [DD-35](#dd-35-guidance-for-the-failures-with-a-known-fix) | Guidance for the failures with a known fix | [Architecture](architecture.md#error-guidance) |
 
 [Decisions that follow from these](#decisions-that-follow-from-these) lists the narrower decisions each page records.
 
@@ -144,10 +153,10 @@ bypass it. An ambient session hides exactly what a reviewer needs to see.
 
 **Consequences.** A forgotten `session` compiles. The call then runs outside the transaction: it is not rolled back,
 and it can block on the transaction's own writes. The detector catches it only on code paths a test executes, and it
-relies on the driver marking in-transaction commands with the session's `lsid` and `autocommit: false`, which an
-integration test pins, and on godwit opening each of a step's transactions with its own read, tagged with the comment
-`{godwit: <migration id>}`. The
-services a step calls must be built from the `MongoClient` passed to `Godwit`.
+relies on the driver marking in-transaction commands with the session's `lsid`, the transaction's `txnNumber` and
+`autocommit: false`, which an integration test pins, and on godwit opening each of a step's transactions with its own
+read, tagged with the comment `{godwit: <migration id>}` (DD-29). The services a step calls must be built from the
+`MongoClient` passed to `Godwit`.
 
 **In depth.** [Transactions and sessions](transactions-and-sessions.md#an-explicit-session),
 [testing](testing.md#the-detector-is-a-test-time-check).
@@ -245,8 +254,8 @@ probe must both exceed the longest migration.
 
 **Decision.** `godwit-history` holds one document per migration, `_id` = id, updated in place: kind, state (`RUNNING`,
 `FAILED`, `APPLIED`), origin (`RAN`, `ADOPTED`, `SUPERSEDED`, `MARKED`), attempts, transaction retries, counters,
-duration, last error, checkpoint, run count and revision for repeatables, `supersedes`, holder, owner token, run id,
-godwit version and format version.
+duration, last error, checkpoint, run count (repeatable and every-start), revision (repeatable), `supersedes`,
+holder, owner token, run id, godwit version and format version.
 
 **Options considered.**
 
@@ -333,9 +342,9 @@ never ends when one document cannot stop matching its filter. With the checkpoin
 page commits exactly once and a resumed run continues after the last committed page.
 
 **Consequences.** The `_id`s of the documents that match `pending` must share one BSON type (all numeric types count as
-one). godwit checks every page, and before the last commit the documents left, and fails the migration naming both
-types; `pending` can select one type. Documents inserted during the run below the checkpoint are not visited, so the
-application writes new documents in the new shape.
+one). godwit checks every page, and before the last commit the documents left (DD-34), and fails the migration naming
+both types; `pending` can select one type. Documents inserted during the run below the checkpoint are not visited, so
+the application writes new documents in the new shape.
 
 **In depth.** [Batched backfills](batched-backfills.md#godwit-pages-the-author-writes-the-page).
 
@@ -442,7 +451,8 @@ isolation free: no cleanup, parallel specs.
 ## DD-17. Standalone servers fail only when a transaction is due
 
 **Decision.** When a transactional step is due and the server is a standalone `mongod`, `migrate` throws
-`TransactionsUnsupportedException` before taking the lock, with instructions for a single-node replica set.
+`TransactionsUnsupportedException` before taking the lock (or under it, before any migration runs, when the plan made
+there has a transactional step due that the first plan did not), with instructions for a single-node replica set.
 Outside-only migrations run on a standalone server.
 
 **Options considered.**
@@ -459,7 +469,8 @@ flag and one command.
 nothing due stays one query. Adoption sends `hello` too when it has ids to record, to choose between one transaction
 and one write per id; the call reuses that answer, so it sends `hello` at most once.
 
-**In depth.** [Transactions and sessions](transactions-and-sessions.md#fail-on-a-standalone-server-only-when-needed).
+**In depth.** [Transactions and sessions](transactions-and-sessions.md#fail-on-a-standalone-server-only-when-needed),
+[architecture](architecture.md#check-the-topology-only-when-needed).
 
 ## DD-18. Logging through slf4j-api 2 only
 
@@ -546,7 +557,8 @@ come from the returned report.
 
 **Decision.** An `APPLIED` history id that the list does not know logs a warning and is returned in
 `report.unknownApplied` (`UnknownApplied.WARN`); `UnknownApplied.FAIL` makes it a `PlanConflictException`. Ids named in
-the stored `supersedes` list of any recorded superseding migration count as known.
+a `supersedes` list of the list itself, or in the stored `supersedes` list of any recorded superseding migration, count
+as known.
 
 **Options considered.**
 
@@ -585,9 +597,9 @@ so at 5.7.0 the driver retries a transaction body immediately; godwit pauses bet
 
 ## DD-24. Three DDL helpers
 
-**Decision.** `ensureCollection`, `ensureSearchIndex` (with `awaitReady`, calling `checkLock()` between polls) and
-`dropIndexIfExists`, as members of the outside step's scope and as public `MongoDatabase` and `MongoCollection`
-extensions.
+**Decision.** `ensureCollection`, `ensureSearchIndex` (with `awaitReady`; the scope's member calls `checkLock()`
+between polls) and `dropIndexIfExists`, as members of the outside step's scope and as public `MongoDatabase` and
+`MongoCollection` extensions.
 
 **Options considered.**
 
@@ -645,11 +657,263 @@ what is tested, and it runs on every later JDK. Lowering the Kotlin language and
 code back and add a compatibility matrix that nothing tests, for consumers nobody has asked to support.
 
 **Consequences.** An application on Java 17 cannot load godwit's classes, and one that compiles with Kotlin older
-than 2.4 is not supported: nothing tests it. The consumer smoke project of the release compiles with Kotlin 2.4.
+than 2.4 is not supported: nothing tests it. The consumer smoke project of the release compiles with Kotlin 2.4.0.
 Lowering either baseline later does not break existing consumers.
 
 **In depth.** [README](../README.md#requirements),
 [implementation plan](development/implementation-plan.md#decisions-settled-before-p0).
+
+## DD-27. The lock is taken by a conditional pipeline upsert
+
+**Decision.** One `findOneAndUpdate` on the lock document's `_id`, with `upsert` and an update pipeline: `$replaceWith`
+a `$cond` that writes this run's owner token and a lease of server time (`$$NOW` plus `lease`) when
+`expiresAt <= $$NOW` (expired, released, or missing), and keeps the document as it is otherwise. The returned document
+is the answer: this run's token means acquired, another token means held.
+
+**Options considered.**
+
+- A filter that selects only a free lock, `{_id, $expr: {$lte: ["$expiresAt", "$$NOW"]}}`, with `upsert`.
+- A filter on the client's clock, `expiresAt: {$lte: <now>}`, with `upsert`.
+- A read, then a conditional update.
+- A lock document that a TTL index removes.
+- A filter on `_id` alone, with the condition in the pipeline (chosen).
+
+**Rationale.** The server refuses `$expr` in the query of an upsert, so the first option cannot be sent. The second
+makes the lease depend on the clock of every process. A read followed by an update leaves a gap in which another
+process takes the lock. A TTL monitor runs about once a minute, so a crashed holder's lock would outlive its lease by
+an unknown time ([locking](locking.md#why-there-is-no-ttl-index)). In the pipeline the condition runs on the server's
+clock, in the same write that takes the lock, and the filter stays an equality on `_id`: that is what lets the server
+retry an upsert that hits a duplicate key as an update, so two processes racing on a missing lock document both get a
+document back and read the answer from its owner token.
+
+**Consequences.** The lock needs pipeline updates and `$$NOW`, which MongoDB has from 4.2, within godwit's 4.4.2
+floor. The owner token, holder and run id go into the pipeline as `$literal`, so a configured holder that starts with
+`$` is stored as it is. A duplicate key that reaches godwit all the same counts as held. An acquire that took the lock
+but whose reply was lost, and that the driver does not retry, propagates the driver's exception; the lease it granted
+holds every start off until it ends on its own ([architecture](architecture.md#edge-cases)).
+
+**In depth.** [Architecture](architecture.md#lock-operations),
+[locking](locking.md#a-leased-document-with-server-time-a-heartbeat-and-an-owner-token).
+
+## DD-28. A conditional history upsert is sent once more after a duplicate key
+
+**Decision.** The once-only `RUNNING` marker and the `SUPERSEDED` and `MARKED` records are upserts filtered on
+`{_id, state: {$ne: "APPLIED"}}`. A duplicate key sends the same write once more; a second duplicate key means the
+document is `APPLIED`, which the marker reads as "applied by another run" and the records as "already recorded".
+
+**Options considered.**
+
+- Read the first duplicate key as `APPLIED`.
+- Filter on `_id` alone and put the state condition in an update pipeline, as the lock does.
+- Send the write once more (chosen).
+
+**Rationale.** A duplicate key answers two states. Either the document is `APPLIED`, so the filter matches nothing and
+the insert collides with it, or the document was missing and another write inserted it first, in any state: the
+server retries a duplicate-key upsert as an update only for a filter of equalities on `_id`, and `$ne` is not one.
+Read as `APPLIED` at once, the second state would skip a migration that never applied. Sent once more, the write finds
+the document, which its filter matches unless it is `APPLIED`. A pipeline could express the condition too, but the
+filter states the rule where the server enforces it on every write, even for a run that lost the lock and does not
+know it yet, and the marker keeps the plain `$set` and `$inc` of an ordinary update.
+
+**Consequences.** A marker that loses a race on a missing document takes the document over on its second send. The
+`checkLock()` right after the marker and the owner fence of every later write settle that takeover (DD-10). Every other
+upsert godwit sends filters on `_id` alone, so no other write meets the ambiguity.
+
+**In depth.** [Architecture](architecture.md#history-writes).
+
+## DD-29. Each step transaction opens with godwit's own tagged read
+
+**Decision.** The first command of every transaction of a transactional step is godwit's: in `inTransaction`, a read
+of the migration's history document on the step's session, before the body runs; in `inBatches`, the page's read. Each
+carries the comment `{godwit: <migration id>}`, and godwit keeps the number of the transaction that read opened.
+
+**Options considered.**
+
+- Let the body's first command start the transaction.
+- Tell godwit-test which transaction is godwit's through state the two modules share, such as a thread-local.
+- godwit's own first command, tagged with a comment (chosen).
+
+**Rationale.** The driver sends `startTransaction: true` on a transaction's first command, so when that command is
+godwit's, the start of the step's transaction is always godwit's and never a service's own. `SessionEscapeDetector`
+then recognises the step's transaction from the command stream alone, by the tagged command that starts it, its `lsid`
+and its `txnNumber`: no API joins godwit-core and godwit-test, and the detector works on any client a test builds. The
+transaction number is what godwit compares before its own last write (DD-30). The comment also names the migration in
+the server's logs and profiler.
+
+**Consequences.** Each attempt of an `inTransaction` step reads one small document more. An `inBatches` page reads
+nothing more: its page read is the opening command. Every attempt the driver runs again opens its transaction the same
+way, so the detector tracks each one.
+
+**In depth.** [Architecture](architecture.md#running-one-migration), [testing](testing.md#sessionescapedetector).
+
+## DD-30. A step that ends godwit's transaction fails
+
+**Decision.** Before its last write in a step's transaction (the `APPLIED` record, or a page's checkpoint), godwit
+checks that the session still has an active transaction with the number its opening read got. When it does not, the
+step fails with `IllegalStateException`, and the migration is recorded `FAILED`.
+
+**Options considered.**
+
+- Trust the body.
+- Give the body a session wrapper that refuses `commitTransaction`, `abortTransaction` and `startTransaction`.
+- Check the session before godwit's last write (chosen).
+
+**Rationale.** A body, usually through a service, that commits or aborts the session it was given leaves no
+transaction. The driver would then send godwit's last write on its own and skip the commit: the migration would be
+`APPLIED` with its writes rolled back, or committed apart from the record. A body that commits and starts a transaction
+of its own leaves another transaction number, with the same result. A wrapper is not the driver's `ClientSession`, so
+the services that take the driver's type could not receive it. The check needs no I/O.
+
+**Consequences.** Writes the body committed before the check stay committed: godwit can refuse its record, not undo a
+commit it did not make. `SessionEscapeDetector` reads that commit or abort as the end of the step's transaction and
+checks nothing after it, so this failure is what a test sees. The check reads the number from the driver's server
+session (`ServerSession.transactionNumber`), public driver API that a driver upgrade must keep.
+
+**In depth.** [Transactions and sessions](transactions-and-sessions.md#a-service-starts-its-own-transaction),
+[architecture](architecture.md#running-one-migration).
+
+## DD-31. Every history and lock command carries a `{godwit: ...}` comment
+
+**Decision.** Every command godwit sends to its history and lock collections carries the comment `{godwit: <subject>}`:
+the migration id for a command about one migration, `"history"` for the read of every history document, `"lock"` for
+the lock's commands. godwit-test's `forget` tags its delete the same way.
+
+**Options considered.**
+
+- No comment.
+- A comment on the reads that open a step's transactions only.
+- A client of godwit's own, with its own `appName`, for the bookkeeping.
+- A comment on every command (chosen).
+
+**Rationale.** godwit sends its own commands outside a step's transaction only once that transaction is over, so a
+tagged command outside the transaction the detector tracks ends it. A transaction whose commit or abort never reached
+the listener (an interrupted thread, an abort that found no server) then ends at godwit's next command on that thread,
+instead of failing godwit's own write as an escape. The comment also shows in the server's logs, profiler and
+`currentOp`, so an operator tells godwit's operations, and the migration each belongs to, from the application's. A
+client of godwit's own could not share a session with the app's client, and the `RUNNING` marker must go out on the
+causally consistent session that later carries the step's transaction.
+
+**Consequences.** godwit needs MongoDB 4.4, where `update` and `findAndModify` accept `comment`; with the topology
+check's `hello`, which the server answers from 4.4.2, that makes 4.4.2 godwit's lowest supported server. A profiler query on `command.comment.godwit` lists godwit's commands.
+
+**In depth.** [Architecture](architecture.md#running-one-migration), [testing](testing.md#sessionescapedetector).
+
+## DD-32. A lost reply is settled by a majority-acknowledged write
+
+**Decision.** When the driver throws after a write of godwit's that may have applied (a step's commit, or the `APPLIED`
+record of a migration with only an outside step), godwit sends a fenced write with majority write concern that matches
+nothing if the first write applied, and only then reads the document. For a transactional step, that write is the
+`FAILED` record, fenced on the owner token and `RUNNING`; for an outside-only migration, it is the same `APPLIED`
+record, sent once more. A document `APPLIED` with this run's owner token means the migration is applied, and the run
+continues with the next one.
+
+**Options considered.**
+
+- Record every driver exception after a commit as a failure, and let the next start sort it out.
+- Read the document right after the exception, with majority read concern.
+- Retry the write until it succeeds.
+- A fenced majority write, then a read (chosen).
+
+**Rationale.** A commit or a majority write can apply on the server and still throw on the client: the reply was lost,
+or a client-side timeout ended during the majority wait. Recorded `FAILED` without looking, the migration would run its
+transactional step again on the next start, over data it already changed; the `FAILED` write is fenced on `RUNNING` so
+that it cannot. A majority read right after a timeout cannot see a write that is still waiting for its majority, so it
+would report a failure that the next start contradicts. The server acknowledges a majority write that matches nothing
+only once everything before it, the first write included, is majority-committed, so the read that follows sees the
+first write when it applied and never reports applied what a failover could still roll back. A retry loop would hold
+the lock for an outage of unknown length.
+
+**Consequences.** The extra write and read happen only after a driver exception. When the second write fails too (the
+same outage, or a majority still behind once its own timeout passes), or the read fails, `migrate` throws with both
+exceptions, one attached to the other as suppressed, and the next start finds the migration `APPLIED` or resumes it.
+When the lock is lost by the time a commit's error arrives, `migrate` throws `LockLostException` with that error as its
+cause without reading the document, and the next start finds the migration `APPLIED` when the commit applied.
+
+**In depth.** [Architecture](architecture.md#running-one-migration),
+[failure and recovery](failure-and-recovery.md#history-write-fails).
+
+## DD-33. A run of another kind clears the stored revision
+
+**Decision.** A repeatable is up to date only when its document is `APPLIED`, has `kind: REPEATABLE` and holds the
+repeatable's revision. Every run writes its own `kind` into the document, and the `APPLIED` record of any other kind
+removes `revision`.
+
+**Options considered.**
+
+- Compare the revision alone.
+- A document, or an id, per kind.
+- Kind and revision together, with `revision` removed by a run of another kind (chosen).
+
+**Rationale.** A history document belongs to an id, and an id can change kind between releases: an every-start
+migration becomes a repeatable, and a rollback deploys the release before. `revision` must name the revision whose
+data is in the database. After an every-start or once-only run of the id, the data is that run's, whatever revision
+the document held before; compared alone, that revision would skip the repeatable over data it did not write. A
+document per kind would split one id's history and its `runCount`.
+
+**Consequences.** Moving an id between repeatable and every-start needs nothing: each release runs its own kind, and
+the repeatable runs again after an every-start run, at its unchanged revision. A once-only migration whose id has an
+`APPLIED` document of another kind counts as applied and does not run, so a once-only migration that must run gets an
+id of its own. `runCount` counts the runs of both kinds.
+
+**In depth.** [Repeatable migrations](repeatable-migrations.md#changing-a-migrations-kind),
+[architecture](architecture.md#history-writes).
+
+## DD-34. The other-type `_id` check runs outside the transaction
+
+**Decision.** Every page of an `inBatches` step must hold `_id`s of the run's type class, which the page's
+transaction checks. Before the last page commits, one more query, outside any transaction and with majority read
+concern, checks that no document matching `pending` has an `_id` of another class: the last page's first transaction
+reads the page and commits nothing, the check runs, and the page runs again in a new transaction that calls the step
+and records `APPLIED`.
+
+**Options considered.**
+
+- No check: `$gt` on `_id` silently skips the documents of another type.
+- The check inside the last page's transaction.
+- The check once, before the first page.
+- The check outside any transaction, between the last page's two transactions (chosen).
+
+**Rationale.** The check reads every document of another class that does not match `pending` (the `_id` index bounds
+it to the other classes, not to `pending`), and without an index that serves `pending` there can be many of them:
+inside a transaction, that read would count against the page's 60 s lifetime. Before the first page, the run's class
+is not known yet, and the check would miss documents of another type inserted while the run pages. Run just before
+the last commit, it sees what the run would otherwise leave behind.
+
+**Consequences.** The last page is read twice. A document of another class inserted between the check and the last
+commit is not seen. A `pending` narrowed to one `_id` type (`Filters.type("_id", ...)`) makes the check read nothing.
+A failed check fails the migration in `IN_BATCHES`, naming both types, with the committed pages and their checkpoint
+kept; a resumed run takes its class from the checkpoint.
+
+**In depth.** [Architecture](architecture.md#checkpoint-writes),
+[batched backfills](batched-backfills.md#_ids-of-more-than-one-bson-type).
+
+## DD-35. Guidance for the failures with a known fix
+
+**Decision.** `MigrationFailedException`'s message adds one line of guidance for the causes godwit recognises in the
+step's exception or its causes, up to eight levels deep: a transaction past its lifetime, a transaction too large for
+the storage engine's cache, the same two for an `inBatches` page, DDL in a transaction, and a session passed to an
+operation on another client. The cause stays the step's exception, unchanged.
+
+**Options considered.**
+
+- The driver's exception alone.
+- A godwit exception type per cause, in place of the driver's.
+- One guidance line on the one exception godwit throws (chosen).
+
+**Rationale.** Each of these failures has a fix the driver's message does not name: `NoSuchTransaction` does not say
+"process the documents with `inBatches`", and "ClientSession from same MongoClient" does not say which client to
+change. A type per cause would hide the driver's exception from the code that catches it; a line costs nothing. The
+fix depends on the step: an `inTransaction` step past its lifetime moves its documents to `inBatches`, while an
+`inBatches` page lowers `batchSize` or gets an index that serves `pending`. The lifetime line needs an attempt that ran
+at least 60 s, because a `NoSuchTransaction` after a short attempt has another reason. godwit looks into the causes
+because an application's service often wraps the driver's error.
+
+**Consequences.** The lines are fixed strings, listed in the `MigrationFailedException` KDoc and quoted in the docs
+from one table. A cause godwit does not recognise adds no line. The 60 s threshold is the server's default
+`transactionLifetimeLimitSeconds`: on a server with a lower limit, an attempt aborted before 60 s gets no lifetime line.
+
+**In depth.** [Architecture](architecture.md#error-guidance),
+[failure and recovery](failure-and-recovery.md#transaction-past-60-s).
 
 ## Decisions that follow from these
 
@@ -662,19 +926,23 @@ Each page records the narrower decisions that follow from the ones above:
 | Snapshot, majority and primary for every transaction, not configurable | DD-3 | [Transactions and sessions](transactions-and-sessions.md#fixed-concerns) |
 | No DDL in transactions | DD-24 | [Transactions and sessions](transactions-and-sessions.md#no-ddl-in-transactions) |
 | No checksums of migration code | DD-1, DD-12 | [Declaring migrations](declaring-migrations.md#no-checksums-of-migration-code) |
-| No dependency container, no typed bag, no lazy providers | DD-2 | [Dependencies](dependencies.md#no-di-container) |
+| No dependency container, no typed bag, no lazy providers | DD-2 | [Dependencies](dependencies.md#no-di-container), [dependencies](dependencies.md#no-typed-dependency-bag), [dependencies](dependencies.md#no-lazy-providers) |
 | A leased lock document on server time, a heartbeat and an owner token; no TTL index | DD-9 | [Locking](locking.md#a-leased-document-with-server-time-a-heartbeat-and-an-owner-token) |
 | No lock when nothing is due | DD-9 | [Locking](locking.md#no-lock-when-nothing-is-due) |
 | A report object and log lines, no listener API | DD-18, DD-21 | [History and reports](history-and-reports.md#a-report-object-and-log-lines-no-listener-api) |
 | Stop at the first failure; retry on the next start, not inside `migrate` | DD-11 | [Failure and recovery](failure-and-recovery.md#stop-at-the-first-failure) |
 | `FAILED` written outside the transaction, fenced on the owner token and `RUNNING` | DD-10 | [Failure and recovery](failure-and-recovery.md#failed-written-outside-the-transaction-fenced) |
-| Paging by `_id`, one transaction per page with the checkpoint inside | DD-13 | [Batched backfills](batched-backfills.md#paging-by-_id) |
+| Paging by `_id`, one transaction per page with the checkpoint inside | DD-13 | [Batched backfills](batched-backfills.md#paging-by-_id), [batched backfills](batched-backfills.md#one-transaction-per-page-with-the-checkpoint-inside) |
+| No `inBatches` in repeatable or every-start migrations | DD-12, DD-13 | [Batched backfills](batched-backfills.md#no-inbatches-in-repeatables), [repeatable migrations](repeatable-migrations.md#no-inbatches-no-targets) |
+| The DDL helpers are scope members and public extensions | DD-24 | [Outside-transaction steps](outside-transaction-steps.md#members-and-extensions) |
+| Counters named by the application | DD-10 | [History and reports](history-and-reports.md#counters-named-by-the-app) |
 | Only declared ids are adopted, as a prefix; godwit never writes to the old record | DD-14 | [Adopting an existing database](adopting-an-existing-database.md#only-declared-ids-are-imported) |
 | The hook runs until something other than adoption is recorded; the order checks wait for it | DD-7, DD-14 | [Adopting an existing database](adopting-an-existing-database.md#the-hook-runs-until-something-other-than-adoption-is-recorded), [architecture](architecture.md#one-migrate-call) |
 | `markApplied` refuses until adoption ends | DD-11, DD-14 | [Adopting an existing database](adopting-an-existing-database.md#markapplied-refuses-until-adoption-ends) |
 | A recorded baseline is exempt from the out-of-order policy | DD-7, DD-15 | [Squashing migrations](squashing-migrations.md#a-recording-is-not-a-run) |
 | One list per database in a multi-module application | DD-6, DD-8 | [Libraries and modules](libraries-and-modules.md#one-list-per-database-in-a-multi-module-app) |
 | One immutable configuration; every default is a production value | DD-21 | [Configuration](configuration.md#one-immutable-config-every-default-a-production-value) |
+| Few settings, none for correctness; per-environment differences are application code | DD-21 | [Configuration](configuration.md#few-knobs-and-none-for-correctness), [configuration](configuration.md#per-environment-differences-are-code-you-own) |
 | Lock settings validated when the configuration is built | DD-9 | [Configuration](configuration.md#the-relations-between-lock-settings-are-checked-when-the-config-is-built) |
 | A pure planner; conflicts checked before the fast path, except those adoption can still resolve; the untracked guard under the lock | DD-7, DD-8, DD-14 | [Architecture](architecture.md#a-pure-planner), [architecture](architecture.md#one-migrate-call) |
 | The `RUNNING` marker committed outside the step's transaction | DD-10 | [Architecture](architecture.md#the-marker-outside-the-transaction) |

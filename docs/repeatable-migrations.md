@@ -164,7 +164,8 @@ document, updated in place:
 | `lastRunAt` | When the last successful run finished |
 | `state` | APPLIED between runs; RUNNING during one; FAILED after a failed one |
 | `attempts` | Runs started since the last APPLIED: 1 after a clean run, so it starts again with each run |
-| `counts`, `durationMs` | Of the last run |
+| `counts`, `transactionRetries` | Of the last successful run |
+| `durationMs`, `finishedAt` | Of the last run, a failed one included |
 
 The [history reference](history-and-reports.md) has every field.
 
@@ -213,10 +214,10 @@ The shape is the usual one for external state ([transactions and sessions](trans
 The seed list reaches the migration as a function parameter, from `config.bootstrap.customers`
 ([dependencies](dependencies.md)).
 
-Every start pays for it: a lock acquire and release, one HTTP call per seed customer, a history write. In a rollout of
-six pods, the six starts run it one after another, each waiting for the lock while the one before runs. Prefer
-`repeatable` unless the work must happen on every start: here it must, because the drift happens at the provider,
-where no revision can see it.
+Every start pays for it: a lock acquire and release, one HTTP call per seed customer, two history writes (the RUNNING
+marker and the APPLIED record). In a rollout of six pods, the six starts run it one after another, each waiting for the
+lock while the one before runs. Prefer `repeatable` unless the work must happen on every start: here it must, because
+the drift happens at the provider, where no revision can see it.
 
 ## Placement and run order
 
@@ -283,9 +284,11 @@ because the lock was never taken), then runs the November revision from this pag
   returns without the lock.
 - A due repeatable takes the lock like any due migration, and runs once per new revision per database. A process that
   read history before another one applied the new revision waits for the lock, reads history again under it, finds the
-  revision applied and releases the lock without running it. The exception is a run that loses the lock between its
-  check and its marker: its marker can land after another run applied the revision and reopen it, and the next start
-  runs that revision once more ([architecture](architecture.md#edge-cases)).
+  revision applied and releases the lock without running it. Two races with a run that has lost the lock are the
+  exceptions, and each runs the revision once more: that run's commit lands just after the new holder read history
+  under the lock and before the new holder's marker, so the new holder runs the revision again; or that run's marker
+  lands after the new holder applied the revision and reopens it, and the next start runs it again
+  ([architecture](architecture.md#edge-cases)).
 - An every-start migration is always due, so a list that contains one takes the lock and writes history on every
   start; such a list never takes the fast path.
 
@@ -499,10 +502,10 @@ on every start".
 
 Chosen: the app sets `revision`, and changes it in the same commit as the code.
 
-Considered: a checksum of the migration's code, which is what file-based tools compute from a script. A Kotlin lambda
-has no stable source text at runtime, and its bytecode changes with the compiler version or an unrelated refactor, so
-a checksum would rerun migrations on upgrades that changed nothing and miss changes in data the step reads from
-elsewhere. A revision states the intent; a derived revision (above) is available when the data is the whole of it.
+Considered: a checksum of the migration's code. A Kotlin lambda has no stable source text at runtime, and its bytecode
+changes with the compiler version or an unrelated refactor, so a checksum would rerun migrations on upgrades that
+changed nothing and miss changes in data the step reads from elsewhere. A revision states the intent; a derived revision
+(above) is available when the data is the whole of it.
 
 ### Run last, listed last
 

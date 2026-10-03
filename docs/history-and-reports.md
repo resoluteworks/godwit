@@ -1,10 +1,11 @@
 # History and reports
 
 godwit records what it did in two places. The `godwit-history` collection holds one document per migration, updated in
-place, and is the source of truth for what is due: a migration whose document is `APPLIED` never runs again. Each
-`migrate` call also returns a `MigrationReport` and writes structured log lines, which say what that one call did. This
-page describes the history documents field by field, with an example of every state and origin, the report and status
-APIs, `history()` and `markApplied`, the log lines, and how to query history from the mongo shell.
+place, and is the source of truth for what is due: a once-only migration whose document is `APPLIED` never runs again,
+and a repeatable one runs again when its revision changes. Each `migrate` call also returns a `MigrationReport` and
+writes structured log lines, which say what that one call did. This page describes the history documents field by
+field, with an example of every state and origin, the report and status APIs, `history()` and `markApplied`, the log
+lines, and how to query history from the mongo shell.
 
 ## Contents
 
@@ -68,7 +69,7 @@ majority read concern on the primary, at the start of every call.
 | `_id` | String | always | The migration id |
 | `kind` | String | always | `ONCE`, `EVERY_START` or `REPEATABLE`. In Kotlin, `HistoryEntry.kind` and `Migration.kind` are a `MigrationKind`: `MigrationKind.Once`, `MigrationKind.EveryStart` or `MigrationKind.Repeatable(revision)` |
 | `revision` | String | repeatable, when a run applies it; removed when a run of another kind applies | The revision that was last applied. A different revision in code makes it due |
-| `description` | String | when a run starts, if the migration declares one | The migration's description as of the last run |
+| `description` | String | when a run starts, if the migration declares one; a run of a migration that declares none removes it | The migration's description as of the last run |
 | `steps` | [String] | always | `OUTSIDE_TRANSACTION`, `IN_TRANSACTION`, `IN_BATCHES`, in order, as of the last run. Empty for a migration recorded without ever running |
 | `state` | String | always | `RUNNING`, `FAILED` or `APPLIED` |
 | `origin` | String | always | `RAN`, `ADOPTED`, `SUPERSEDED` or `MARKED`: how it came to be (or is becoming) `APPLIED` |
@@ -76,7 +77,7 @@ majority read concern on the primary, at the start of every call.
 | `transactionRetries` | Int | when a run applies it | Driver retries of transaction bodies in the run that applied it, over every transaction (every page of an `inBatches` step) |
 | `counts` | Document | when a run applies it | The counters the steps set with `count`, such as `{ordersUpdated: 1199873}` |
 | `durationMs` | Long | after a run | Duration of the last run, applied or failed, on the monotonic clock |
-| `startedAt`, `finishedAt` | Date | `startedAt` when a run starts, `finishedAt` when it applies or fails | The writing process's clock. Informational |
+| `startedAt`, `finishedAt` | Date | `startedAt` when a run starts, `finishedAt` when it applies or fails, or when the migration is recorded `APPLIED` without running | The writing process's clock. Informational |
 | `lastError` | Document | when a run fails | `{type, message, stack, step, at}`. Kept while the migration is retried, removed when it applies or is recorded `APPLIED` (`SUPERSEDED`, `MARKED`) |
 | `checkpoint` | Document | `inBatches`, with each page | `{lastId, batches, counts}`: the last committed page. Removed when it applies or is recorded `APPLIED` (`SUPERSEDED`, `MARKED`) |
 | `runCount`, `lastRunAt` | Long, Date | repeatable and every-start, when a run applies it | Successful runs, and when the last one finished |
@@ -88,14 +89,15 @@ majority read concern on the primary, at the start of every call.
 | `runId` | String | always | The `MigrationReport.runId` of the call that last wrote it |
 | `godwitVersion`, `v` | String, Int | always | The godwit version that wrote it, and the document format version (1) |
 
-Fields that do not apply are absent. `history()` reads an absent `counts` as an empty map and an absent `supersedes` as
-an empty list.
+Fields that do not apply are absent. `history()` reads an absent `counts` as an empty map, an absent `steps` or
+`supersedes` as an empty list, an absent `attempts` or `transactionRetries` as 0 and an absent `outOfOrder` as false;
+every other absent field is `null`.
 
 How the states and origins combine:
 
 | `state` | `origin` | Means | Next `migrate` |
 |---|---|---|---|
-| `RUNNING` | `RAN` | A run is in progress, or a run was interrupted (crash, lost lock) | If no process holds the lock: runs it again, logging `Resuming interrupted migration` |
+| `RUNNING` | `RAN` | A run is in progress, or a run was interrupted (crash, lost lock) | Waits for the lock; if the document is still `RUNNING` then, runs it again, logging `Resuming interrupted migration` |
 | `FAILED` | `RAN` | The last run failed; `lastError` says why | Runs it again, outside step first |
 | `APPLIED` | `RAN` | godwit ran it | Once-only: never again. Repeatable: when the revision changes. Every-start: on every start |
 | `APPLIED` | `ADOPTED` | `GodwitConfig.adoptApplied` reported it applied before godwit tracked the database | Never runs it |
@@ -146,7 +148,7 @@ does not ([locking.md](locking.md#a-crashed-holder)).
   "lastError": {
     "type": "java.net.http.HttpTimeoutException",
     "message": "request timed out",
-    "stack": "java.net.http.HttpTimeoutException: request timed out\n\tat java.net.http/jdk.internal.net.http.HttpClientImpl.send(HttpClientImpl.java:950)\n\tat com.example.shop.services.HttpIdentityProvider.findOrCreateUser(IdentityProvider.kt:24)\n\t...",
+    "stack": "java.net.http.HttpTimeoutException: request timed out\n\tat ...",
     "step": "OUTSIDE_TRANSACTION",
     "at": { "$date": "2026-10-02T10:14:35.712Z" }
   },
@@ -193,8 +195,9 @@ none of them would exist.
 
 ### `APPLIED` by adoption (`ADOPTED`)
 
-A shop database migrated by hand before godwit, with `003-file-store` in its `schema-log`, adopted through
-`GodwitConfig(adoptApplied = ::appliedBeforeGodwit)` ([adopting-an-existing-database.md](adopting-an-existing-database.md)):
+A shop database migrated by hand before godwit, with `001-initial-setup` to `003-file-store` in its `schema-log`,
+adopted through `GodwitConfig(adoptApplied = ::appliedBeforeGodwit)`
+([adopting-an-existing-database.md](adopting-an-existing-database.md)):
 
 ```json
 {
@@ -281,7 +284,8 @@ a `MARKED` record does.
 ```
 
 `markApplied` sets `state`, `origin`, `reason`, `holder`, `owner`, `runId`, `finishedAt`, `godwitVersion` and `v`, and
-removes `lastError` and `checkpoint`. The other fields (`steps`, `attempts`, `durationMs`) are those of the failed run.
+removes `lastError` and `checkpoint`. The other fields (`steps`, `attempts`, `startedAt`, `durationMs`) are those of
+the failed run.
 For an id with no document, it creates one with `kind: "ONCE"`, `steps: []` and `attempts: 0`.
 
 ### A repeatable migration
@@ -317,8 +321,8 @@ database; a run of another kind under the same id removes it in its own `APPLIED
 ([changing a migration's kind](repeatable-migrations.md#changing-a-migrations-kind)). When the code's revision becomes
 `"2026-11-15"`, the next start runs it again: the document goes to `RUNNING` with `attempts: 1` (attempts count from
 the last `APPLIED`), and on success `revision` becomes `"2026-11-15"` and `runCount` 2
-([repeatable migrations](repeatable-migrations.md#bumping-the-revision) shows that document). `counts` and
-`durationMs` always describe the last run.
+([repeatable migrations](repeatable-migrations.md#bumping-the-revision) shows that document). `counts` describes the
+last run that applied, and `durationMs` the last run, applied or failed.
 
 ### An every-start migration
 
@@ -428,7 +432,7 @@ In tests, the counts are the assertions (`outcome.count("ordersPaid") shouldBe 1
 
 | Property | Meaning |
 |---|---|
-| `runId` | A UUID per call. It is in every log line of the call and every history document the call wrote |
+| `runId` | A UUID per call. It is in every history document the call wrote, in the call's lock lines and in its `Migrations up to date` or `Migrations complete` line |
 | `ran` | The migrations that ran, in run order, as `MigrationOutcome`s |
 | `recorded` | The migrations recorded without running: adopted or superseded |
 | `upToDate` | Ids found already applied, and repeatables found at their current revision |
@@ -453,8 +457,8 @@ In tests, the counts are the assertions (`outcome.count("ordersPaid") shouldBe 1
 | `duration` | This call's run of the migration; zero for a recorded migration |
 
 When a migration fails, `migrate` throws `MigrationFailedException` instead of returning. Its `report` covers what the
-call did before the failure (the migrations that ran and applied), its `id` and `step` name the failure, and its cause
-is the step's exception ([failure-and-recovery.md](failure-and-recovery.md)).
+call did before the failure (the migrations it ran or recorded, and those it found up to date), its `id` and `step`
+name the failure, and its cause is the step's exception ([failure-and-recovery.md](failure-and-recovery.md)).
 
 ## `status()` and `requireUpToDate()`
 
@@ -465,7 +469,7 @@ see [edge cases](#edge-cases)), without taking the lock or writing anything. It 
 | Property | Meaning |
 |---|---|
 | `pending` | The ids `migrate` would run, in run order. Never includes every-start migrations, nor a squash that `migrate` would only record as `SUPERSEDED`: recording changes no data, so the schema is already what the list expects |
-| `problems` | Why `migrate` would throw: an out-of-order migration under `OutOfOrder.FAIL`, a partially superseded squash, an untracked database, unknown applied ids under `UnknownApplied.FAIL` |
+| `problems` | Why `migrate` would throw: an out-of-order migration under `OutOfOrder.FAIL`, a partially superseded squash, an untracked database, unknown applied ids under `UnknownApplied.FAIL`. `status` does not ask the server whether it runs transactions, so a standalone server is not among them |
 | `unknownApplied` | `APPLIED` ids the list does not know |
 | `isUpToDate` | `pending` and `problems` are both empty |
 
@@ -478,17 +482,16 @@ A deploy pipeline can run it before the rollout, to see what the release will do
  */
 fun checkDeploy(): Int {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
-        val migrations = shopMigrations(config, CustomerService(database), identity)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val migrations = shopMigrations(config, CustomerService(database), identity)
 
-        val status = Godwit(client, config.mongo.database).status(migrations)
-        println("pending: ${status.pending}")
-        println("problems: ${status.problems}")
-        println("unknown applied: ${status.unknownApplied}")
-        return if (status.isUpToDate) 0 else 1
-    }
+    val status = Godwit(client, config.mongo.database).status(migrations)
+    println("pending: ${status.pending}")
+    println("problems: ${status.problems}")
+    println("unknown applied: ${status.unknownApplied}")
+    return if (status.isUpToDate) 0 else 1
 }
 ```
 
@@ -542,13 +545,13 @@ fun printHistory(godwit: Godwit) {
 ```
 
 ```text
-001-initial-setup APPLIED RAN attempts=1 counts={}
-002-carts APPLIED RAN attempts=1 counts={}
+001-initial-setup APPLIED ADOPTED attempts=0 counts={}
+002-carts APPLIED ADOPTED attempts=0 counts={}
 003-file-store APPLIED ADOPTED attempts=0 counts={}
 004-order-status APPLIED RAN attempts=1 counts={ordersPaid=1200, ordersPending=37}
 005-customer-external-ids APPLIED RAN attempts=2 counts={customersLinked=812}
 006-order-totals FAILED RAN attempts=1 counts={}
-  last error in IN_BATCHES: java.lang.NullPointerException: Cannot invoke "java.lang.Long.longValue()" because the return value of "org.bson.Document.getLong(Object)" is null
+  last error in IN_BATCHES: java.lang.NullPointerException: getLong(...) must not be null
   40 batches committed, last _id BsonObjectId{value=66fcf2a19b1e8a0012a1c0d4}
 bootstrap-customers APPLIED RAN attempts=1 counts={customersCreated=0}
 reference-countries APPLIED RAN attempts=1 counts={countriesRemoved=0}
@@ -590,16 +593,19 @@ WARN  godwit - Marked migration applied id=008-customer-email-lower-index reason
 | `APPLIED`, once-only (any origin) | Unchanged; the reason is not recorded |
 | `kind: "REPEATABLE"` or `"EVERY_START"`, in any state (`APPLIED` included) | `IllegalArgumentException`, nothing written |
 
-It waits for the lock like `migrate` (up to `LockConfig.waitTimeout`), so it never marks a migration that a live run is
-executing: the run finishes first. `reason` must not be blank. The id is not checked against any list; a typo shows up
-as an unknown applied id on the next `migrate` ([edge cases](#edge-cases)).
+It waits for the lock like `migrate` (up to `LockConfig.waitTimeout`, then `LockTimeoutException`), so it never marks a
+migration that a live run is executing: the run finishes first. It reads history under the lock and decides from that
+read; a lock lost before the write throws `LockLostException` and writes nothing. `reason` must not be blank. The id is
+not checked against any list; a typo shows up as an unknown applied id on the next `migrate` ([edge cases](#edge-cases)).
 
 Three limits:
 
 - **Once-only migrations only.** An every-start migration is due on every start whatever its document says, and a
   repeatable stays due until a run applies its current revision (`MARKED` would keep the old `revision`). Marking either
-  would change nothing, so `markApplied` refuses. The way past a failing repeatable or every-start migration is code:
-  fix it, or remove it from the list.
+  would change nothing, so `markApplied` refuses an id whose document is `kind: "REPEATABLE"` or `"EVERY_START"`. It
+  takes no list, so an id with no document is recorded `kind: "ONCE"` whatever the list declares; a repeatable or
+  every-start migration with that id still runs on the next start, and its document keeps the mark's `reason`. The way
+  past a failing repeatable or every-start migration is code: fix it, or remove it from the list.
 - **Order.** Marking an id while once-only migrations listed before it are still pending makes those out of order on
   the next `migrate` ([ordering-and-validation.md](ordering-and-validation.md#out-of-order)). Mark an id after the
   migrations before it have applied, or with them when they are applied too. To record several applied ids, such as
@@ -634,8 +640,12 @@ Three limits:
 
 godwit logs through slf4j-api to the logger named `godwit`, with the facts as key-value pairs (the slf4j 2 fluent API).
 With Logback, the `%kvp{NONE}` conversion word prints them after the message, as below; the setup is in
-[configuration.md](configuration.md#logging). Every line of one call carries the same `runId` or migration `id`, so a
-log search for either finds the whole story.
+[configuration.md](configuration.md#logging). Every line about one migration carries its `id`, so a log search for the
+id finds that migration's whole story; the call's lock lines and its `Migrations up to date` or `Migrations complete`
+line carry the call's `runId`, which is also in every history document the call wrote. `Waiting for migration lock`
+names the run it waits for (`holderRunId`), and `Adopted applied migrations` and `Unknown applied migrations` carry
+neither. Which lines to alert on, and which failures throw without a line, is in
+[configuration](configuration.md#what-to-alert-on).
 
 Every log line in these docs prints its values the same way:
 
@@ -676,8 +686,8 @@ Two different attempt numbers appear: `attempt` on `Running migration` is the mi
 applied (the `attempts` field), while `attempt` on `Retrying transaction` and `Slow transaction` is the driver's attempt
 at one transaction body (`TransactionScope.attempt`), which starts at 1 for every transaction and every page.
 
-A deploy that adds `004-order-status` and `005-customer-external-ids`, on a database where the identity provider is slow
-for the first start:
+A deploy that adds `004-order-status` to `006-order-totals`, on a database where the identity provider is slow for the
+first start:
 
 ```text
 INFO  godwit - Acquired migration lock runId=0199a4c2-7b1e-7c3d-9f00-3b2a1c4d5e6f lockWaitMs=212
@@ -742,11 +752,14 @@ godwit-test helpers. The edge cases below show what hand edits do.
 ## Edge cases
 
 **A history document deleted by hand.**
-An operator deletes `004-order-status`'s document to "re-run" it. The next start finds no document, so `004` is due and
-runs again. Its filters (`exists("status", false)`) match nothing now, so it changes nothing and records
-`ordersPaid: 0`. A migration whose work is not guarded by its own filter, such as one that sets a field on every
-document, would apply twice. Never delete history to re-run a migration; write a new migration that does what you
-need. In tests, `forget` and `rerun` from godwit-test do this deliberately ([testing.md](testing.md)).
+An operator deletes `004-order-status`'s document to "re-run" it. The next start finds no document, so `004` is due
+again, listed before the applied `005` and `006`: out of order. Under the default `OutOfOrder.FAIL`, `migrate` throws
+`PlanConflictException` and nothing runs, on every start, until the document is restored. Under `OutOfOrder.RUN`, or
+when no applied once-only migration is listed after it, `004` runs again. Its filters (`exists("status", false)`)
+match nothing now, so it changes nothing and records `ordersPaid: 0`. A migration whose work is not guarded by its own
+filter, such as one that sets a field on every document, would apply twice. Never delete history to re-run a
+migration; write a new migration that does what you need. In tests, `forget` and `rerun` from godwit-test do this
+deliberately ([testing.md](testing.md)).
 
 **A history document edited by hand to `APPLIED`.**
 It works like `markApplied` without the audit: no `reason`, no WARN line, the previous run's `owner`. Use `markApplied`,
@@ -776,7 +789,7 @@ To consolidate or rename, declare the new id with `supersedes = listOf("004-orde
 
 **`markApplied` on an id that is already `APPLIED`.**
 `markApplied("004-order-status", reason = "...")` changes nothing: the document keeps `origin: "RAN"` and the reason is
-not stored. Nothing is logged.
+not stored. No `Marked migration applied` line is logged.
 
 **`markApplied` with a typo.**
 `markApplied("008-customer-email-lower-indx", ...)` creates a `MARKED` document for an id nobody declares. The next
@@ -793,9 +806,9 @@ writing anything.
 
 **`status()` on a database that adoption has not reached yet.**
 A database migrated by hand has no godwit history; the shop is configured with `adoptApplied`. Before any shop process
-has started on it, `status()` reports every migration pending, because adoption runs only inside `migrate`, under the
-lock. A worker calling `requireUpToDate` fails until a shop process has migrated (and adopted) the database. Start the
-shop first, or use `awaitUpToDate` in the worker. The same holds while history holds only `ADOPTED` documents (an
+has started on it, `status()` reports every once-only and repeatable migration pending, because adoption runs only
+inside `migrate`, under the lock. A worker calling `requireUpToDate` fails until a shop process has migrated (and
+adopted) the database. Start the shop first, or use `awaitUpToDate` in the worker. The same holds while history holds only `ADOPTED` documents (an
 interrupted adoption, a refused gap): `status()` lists the ids adoption has not recorded as pending, and reports
 neither an out-of-order or partial-squash conflict nor an untracked database, because the hook, which only `migrate`
 calls, may still resolve them.

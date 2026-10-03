@@ -112,7 +112,7 @@ import java.util.Date
 
 ## The list is valid, without a database
 
-`validateMigrations` is pure: it checks ids, duplicates, numeric order, the placement of repeatables and batch sizes, and reports every problem at once. `migrate`, `status` and `requireUpToDate` run it before any I/O; a unit test runs it in milliseconds, before a container exists.
+`validateMigrations` is pure: it checks the id format, duplicates (counting the ids `supersedes` lists name), `supersedes` lists that name a declared id, numeric order, the placement of repeatable and every-start migrations, blank revisions, `inBatches` in a repeatable or every-start migration and batch sizes, and reports every problem at once. `migrate`, `status` and `requireUpToDate` run it before any I/O; a unit test runs it in milliseconds, before a container exists.
 
 The list is a function of the services the migrations need, so the test passes stand-ins that are never called. `mockk()` is enough for a service the migrations only store.
 
@@ -199,8 +199,8 @@ class MidHistorySpec : StringSpec({
             )
         )
 
-        val outcome = db.godwit.migrate(migrations, target = Target.Through("005-customer-external-ids"))
-            .get("005-customer-external-ids")
+        val report = db.godwit.migrate(migrations, target = Target.Through("005-customer-external-ids"))
+        val outcome = report["005-customer-external-ids"]
 
         outcome.count("customersLinked") shouldBe 1L
         CustomerService(db.database).findByEmail("ann@example.com")?.externalUserId shouldBe "user-ann@example.com"
@@ -253,7 +253,7 @@ class IsolatedMigrationSpec : StringSpec({
 
 ## `forget`: run a migration again
 
-`forget(id)` deletes the history document of `id`, so the next `migrate` runs it again. It exists only in `godwit-test`: production code has no way to un-apply a migration. A missing document stays missing. Forgetting the only history document of a database that has collections leaves it untracked, so a plain `migrate` then refuses it under the default `UntrackedDatabase.REFUSE`; `rerun` turns the guard off.
+`forget(id)` deletes the history document of `id`, so the next `migrate` runs it again. It exists only in `godwit-test`: production code has no way to un-apply a migration. A missing document stays missing. The delete carries the comment `{godwit: <id>}`, as godwit's own history commands do, so `SessionEscapeDetector` treats it as one of them. Forgetting the only history document of a database that has collections leaves it untracked, so a plain `migrate` then refuses it under the default `UntrackedDatabase.REFUSE`; `rerun` turns the guard off.
 
 ```kotlin
 class ForgetSpec : StringSpec({

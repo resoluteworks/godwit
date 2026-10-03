@@ -153,7 +153,8 @@ internal class Runner(
     /**
      * The untracked-database guard: under [UntrackedDatabase.REFUSE], a database whose history is empty while adoption
      * cannot run ([Plan.untracked]) and that holds collections other than godwit's two and `system.*` is refused.
-     * Null when the call may run.
+     * Null when the call may run. The driver lists collections on the primary whatever the app's client reads from, as
+     * godwit reads history there: a lagging secondary could list none on a database whose collections the primary has.
      */
     private fun untrackedRefusal(plan: Plan): UntrackedDatabaseException? {
         if (!plan.untracked || config.untrackedDatabase == UntrackedDatabase.RUN_ALL) return null

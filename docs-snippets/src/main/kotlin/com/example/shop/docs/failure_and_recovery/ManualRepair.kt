@@ -11,10 +11,9 @@ import godwit.core.Godwit
  */
 fun markHandBuiltIndex() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        Godwit(client, config.mongo.database).markApplied(
-            "008-customer-email-lower-index",
-            reason = "Unique index on customers.emailLower built by hand as emailLower_unique during the 2026-10-05 incident"
-        )
-    }
+    val client = MongoClient.create(config.mongo.uri)
+    Godwit(client, config.mongo.database).markApplied(
+        "008-customer-email-lower-index",
+        reason = "Unique index on customers.emailLower built by hand as emailLower_unique during the 2026-10-05 incident"
+    )
 }

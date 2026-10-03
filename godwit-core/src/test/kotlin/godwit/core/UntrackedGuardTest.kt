@@ -1,12 +1,15 @@
 package godwit.core
 
+import com.mongodb.ReadPreference
 import godwit.core.fixtures.CountingHook
 import godwit.core.fixtures.GodwitFixture
 import godwit.core.fixtures.historyDocument
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import org.bson.Document
 
 private fun runs(id: String): Migration = migration(id).outsideTransaction { ensureCollection("carts") }
@@ -37,6 +40,27 @@ class UntrackedGuardTest : StringSpec() {
                 f.database.listCollectionNames().toList().contains("carts") shouldBe false
                 f.collection("shop-lock").find().first().containsKey("releasedAt") shouldBe true
                 f.godwit.status(listOf(runs("002-carts"))).problems shouldBe listOf(refused.message)
+            }
+        }
+
+        "the collections are listed on the primary, like history, when the app's client reads from secondaries" {
+            GodwitFixture().use { f ->
+                f.collection("customers").insertOne(Document("email", "a@example.com"))
+                val secondaryReads = f.client.withReadPreference(ReadPreference.secondaryPreferred())
+                val godwit = Godwit(secondaryReads, f.db.name, f.config)
+
+                godwit.status(listOf(runs("002-carts"))).problems shouldHaveSize 1
+
+                // On a direct connection the driver sends a primary read as primaryPreferred, and any other read
+                // preference as it is, so the command shows which one the operation used. The driver lists
+                // collections on the primary whatever the database's read preference; godwit relies on that.
+                fun readPreferenceOf(name: String) = f.recorder.commands(name).single().command["\$readPreference"]
+                val historyRead = readPreferenceOf("find")
+                historyRead shouldNotBe null
+                readPreferenceOf("listCollections") shouldBe historyRead
+                // The client's own reads carry its read preference, so a listing that did would show here.
+                secondaryReads.getDatabase(f.db.name).getCollection("customers", Document::class.java).find().first()
+                f.recorder.commands("find").last().command["\$readPreference"] shouldNotBe historyRead
             }
         }
 

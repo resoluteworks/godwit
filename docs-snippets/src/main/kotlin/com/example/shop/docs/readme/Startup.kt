@@ -10,8 +10,7 @@ import godwit.core.Migration
 val migrations: List<Migration> = listOf(carts, orderStatus)
 
 fun main() {
-    MongoClient.create(System.getenv("MONGO_URI")).use { client ->
-        Godwit(client, "shop").migrate(migrations)
-        // Build the app's services from this same client, then start serving requests.
-    }
+    val client = MongoClient.create(System.getenv("MONGO_URI"))
+    Godwit(client, "shop").migrate(migrations)
+    // Build the app's services from this same client, then start serving requests.
 }

@@ -1,6 +1,8 @@
 package com.example.shop.docs.dependencies
 
+import com.example.shop.connectPaymentGateway
 import com.example.shop.loadShopConfig
+import com.example.shop.processPaidOrders
 import com.example.shop.services.CustomerService
 import com.example.shop.services.ExternalUser
 import com.example.shop.services.HttpIdentityProvider
@@ -15,17 +17,16 @@ import godwit.core.Godwit
 /** The shop's startup once 009 is added. The gateway connects only if a migration calls it. */
 fun main() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val customers = CustomerService(database)
-        val orders = OrderService(database)
-        val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
-        val gateway = LazyPaymentGateway { connectPaymentGateway() }
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val customers = CustomerService(database)
+    val orders = OrderService(database)
+    val identity = HttpIdentityProvider(config.identity.baseUrl, config.identity.apiKey)
+    val gateway = LazyPaymentGateway { connectPaymentGateway() }
 
-        Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity, gateway))
+    Godwit(client, config.mongo.database).migrate(shopMigrations(config, customers, identity, gateway))
 
-        startHttpServer(customers, orders)
-    }
+    startHttpServer(customers, orders)
 }
 
 /** Connects on first use, so a start that runs no gateway migration never connects. */
@@ -34,9 +35,6 @@ class LazyPaymentGateway(connect: () -> PaymentGateway) : PaymentGateway {
 
     override fun paymentStatus(paymentId: String): PaymentStatus = gateway.paymentStatus(paymentId)
 }
-
-/** Signs in to the payment gateway: slow, and it throws while the gateway is down. */
-fun connectPaymentGateway(): PaymentGateway = TODO("the gateway's client library")
 
 /** Wrong: godwit and the services use two clients, so the services reject godwit's session. */
 fun mainWithTwoClients() {
@@ -53,14 +51,13 @@ fun mainWithTwoClients() {
 /** A background worker deployed next to the shop. It never migrates; it refuses to start on an older schema. */
 fun workerMain() {
     val config = loadShopConfig()
-    MongoClient.create(config.mongo.uri).use { client ->
-        val database = client.getDatabase(config.mongo.database)
-        val migrations = shopMigrations(config, CustomerService(database), NoIdentityProvider, NoPaymentGateway)
+    val client = MongoClient.create(config.mongo.uri)
+    val database = client.getDatabase(config.mongo.database)
+    val migrations = shopMigrations(config, CustomerService(database), NoIdentityProvider, NoPaymentGateway)
 
-        Godwit(client, config.mongo.database).requireUpToDate(migrations)
+    Godwit(client, config.mongo.database).requireUpToDate(migrations)
 
-        processPaidOrders(OrderService(database))
-    }
+    processPaidOrders(OrderService(database))
 }
 
 /** The worker has no identity provider credentials. requireUpToDate runs no step, so nothing calls this. */
@@ -72,6 +69,3 @@ private object NoIdentityProvider : IdentityProvider {
 private object NoPaymentGateway : PaymentGateway {
     override fun paymentStatus(paymentId: String): PaymentStatus = error("The worker does not run migrations")
 }
-
-/** The worker's job. */
-fun processPaidOrders(orders: OrderService): Unit = TODO("the worker's loop")
