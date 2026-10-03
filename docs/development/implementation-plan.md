@@ -147,9 +147,14 @@ atlasLocalImage = mongodb/mongodb-atlas-local:8.0
 `Makefile`. Each recipe line runs only when the previous one exited 0:
 
 ```make
+export OP_ACCOUNT := my.1password.com
 include gradle.properties
 -include .env
 export
+
+env:
+	rm -f .env
+	op read "op://Development/resolute-works-open-source/godwit.env.local" > .env
 
 test:
 	./gradlew clean test
