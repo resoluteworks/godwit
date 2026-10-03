@@ -478,6 +478,9 @@ migration with a transactional step (`inTransaction` or `inBatches`) is due:
   transactions, and nothing runs, not even the outside-only migrations due with them;
 - when every due migration is outside-only, they run, so a list of DDL-only migrations works on a standalone server.
 
+Adoption asks the server too, under the lock, when it has ids to record: the answer chooses between one transaction
+and one write per id, and never refuses the call ([architecture.md](architecture.md#topology-check)).
+
 The shop needs transactions on every start: `bootstrap-customers` is always due and has an `inTransaction` step. On a
 fresh standalone server:
 

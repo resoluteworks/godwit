@@ -4,12 +4,16 @@ import com.mongodb.client.model.Filters.eq
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates.set
 import godwit.core.fixtures.CommandRecorder
+import godwit.core.fixtures.CountingHook
 import godwit.core.fixtures.GodwitFixture
+import godwit.core.fixtures.collection
+import godwit.core.fixtures.plantAdopted
 import godwit.core.fixtures.standaloneMongo
 import godwit.core.internal.transactionsSupported
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.ints.shouldBeGreaterThan
 import io.kotest.matchers.ints.shouldBeLessThan
 import io.kotest.matchers.shouldBe
 import org.bson.Document
@@ -40,6 +44,51 @@ class TopologyTest : StringSpec() {
                 val names = f.recorder.commands.map { it.name }
                 names.count { it == "hello" } shouldBe 1
                 names.indexOf("hello") shouldBeLessThan names.indexOf("findAndModify")
+            }
+        }
+
+        "adoption with ids to record asks hello under the lock when the plan before it had no transactional step" {
+            val hook = CountingHook("001-initial-setup")
+            GodwitFixture(appName = "topology-adoption", config = GodwitConfig(adoptApplied = hook)).use { f ->
+                val list = listOf(
+                    migration("001-initial-setup").outsideTransaction { error("adopted") },
+                    migration("002-carts").outsideTransaction { ensureCollection("carts") }
+                )
+
+                f.godwit.migrate(list).recorded.map { it.id } shouldBe listOf("001-initial-setup")
+
+                val names = f.recorder.commands.map { it.name }
+                names.count { it == "hello" } shouldBe 1
+                names.indexOf("hello") shouldBeGreaterThan names.indexOf("findAndModify")
+                val adoption = f.recorder.commands("update").first { it.collection == "godwit-history" }
+                adoption.command.getBoolean("startTransaction").value shouldBe true
+            }
+        }
+
+        "adoption does not ask hello again when the plan before the lock asked, nor when it has nothing to record" {
+            val adopting = GodwitConfig(adoptApplied = CountingHook("001-a"))
+            GodwitFixture(appName = "topology-asked", config = adopting).use { f ->
+                val list = listOf(
+                    migration("001-a").inTransaction { error("adopted") },
+                    migration("002-b").inTransaction { }
+                )
+
+                f.godwit.migrate(list).recorded.map { it.id } shouldBe listOf("001-a")
+
+                val names = f.recorder.commands.map { it.name }
+                names.count { it == "hello" } shouldBe 1
+                names.indexOf("hello") shouldBeLessThan names.indexOf("findAndModify")
+            }
+            GodwitFixture(appName = "topology-nothing", config = adopting).use { f ->
+                f.history.plantAdopted("001-a")
+                val list = listOf(
+                    migration("001-a").outsideTransaction { error("adopted") },
+                    migration("002-b").outsideTransaction { }
+                )
+
+                f.godwit.migrate(list).ran.map { it.id } shouldBe listOf("002-b")
+
+                f.recorder.commands("hello").shouldBeEmpty()
             }
         }
 

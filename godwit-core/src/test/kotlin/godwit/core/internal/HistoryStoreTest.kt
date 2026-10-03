@@ -26,6 +26,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldBeEmpty
+import io.kotest.matchers.collections.shouldContainAll
 import io.kotest.matchers.ints.shouldBeGreaterThan
 import io.kotest.matchers.maps.shouldNotContainKey
 import io.kotest.matchers.nulls.shouldBeNull
@@ -101,6 +102,18 @@ private class Fixture(val recorder: CommandRecorder = CommandRecorder(), appName
 }
 
 private fun json(text: String): BsonDocument = BsonDocument.parse(text)
+
+/**
+ * Records [ids] ADOPTED through this store for [by] at [at], with [checkLock] as the lock check, and returns the ids
+ * the store passed back as recorded, in the order it passed them.
+ */
+private fun HistoryStore.adopt(
+    ids: List<String>,
+    transactions: Boolean,
+    by: Writer = writer,
+    at: Instant = finishedAt,
+    checkLock: () -> Unit = {}
+): List<String> = buildList { recordAdopted(ids, by, at, transactions, checkLock) { add(it) } }
 
 private fun date(instant: Instant) = $$"""{"$date": "$$instant"}"""
 
@@ -711,15 +724,24 @@ class HistoryStoreTest : StringSpec() {
             val events = CopyOnWriteArrayList<String>()
             val recorder = CommandRecorder(onSucceeded = { events += it.name })
             Fixture(recorder).use { f ->
-                val inserted = f.store.recordAdopted(
+                f.store.recordAdopted(
                     listOf("001-initial-setup", "002-carts"),
                     writer,
                     finishedAt,
-                    transactions = true
-                ) { events += "checkLock" }
+                    transactions = true,
+                    checkLock = { events += "checkLock" },
+                    recorded = { events += "recorded $it" }
+                )
 
-                inserted shouldBe listOf("001-initial-setup", "002-carts")
-                events shouldBe listOf("update", "update", "checkLock", "commitTransaction")
+                // The ids are passed back once the commit is durable, in list order.
+                events shouldBe listOf(
+                    "update",
+                    "update",
+                    "checkLock",
+                    "commitTransaction",
+                    "recorded 001-initial-setup",
+                    "recorded 002-carts"
+                )
                 val updates = recorder.commands("update").map { it.command }
                 updates.map { f.update(it).getDocument("q") } shouldBe listOf(
                     json("""{"_id": "001-initial-setup"}"""),
@@ -756,15 +778,15 @@ class HistoryStoreTest : StringSpec() {
 
         "recording adopted ids twice leaves the first records unchanged" {
             Fixture().use { f ->
-                f.store.recordAdopted(listOf("001-initial-setup", "002-carts"), writer, finishedAt, true) {}
+                f.store.adopt(listOf("001-initial-setup", "002-carts"), transactions = true)
                 val first = f.history.find().toList()
 
-                f.store.recordAdopted(
+                f.store.adopt(
                     listOf("001-initial-setup", "002-carts"),
-                    takeover,
-                    finishedAt.plusSeconds(60),
-                    true
-                ) {}.shouldBeEmpty()
+                    transactions = true,
+                    by = takeover,
+                    at = finishedAt.plusSeconds(60)
+                ).shouldBeEmpty()
 
                 f.history.find().toList() shouldBe first
             }
@@ -775,7 +797,7 @@ class HistoryStoreTest : StringSpec() {
                 f.store.markRunning(carts, takeover, startedAt)
                 val running = f.stored("002-carts")
 
-                f.store.recordAdopted(listOf("001-initial-setup", "002-carts"), writer, finishedAt, true) {} shouldBe
+                f.store.adopt(listOf("001-initial-setup", "002-carts"), transactions = true) shouldBe
                     listOf("001-initial-setup")
 
                 f.stored("002-carts") shouldBe running
@@ -785,6 +807,7 @@ class HistoryStoreTest : StringSpec() {
 
         "the adoption records commit together or not at all: an error on the second write records nothing" {
             Fixture(appName = "history-adoption-error").use { f ->
+                val recorded = mutableListOf<String>()
                 val error = TestMongo.failCommand(
                     "history-adoption-error",
                     listOf("update"),
@@ -792,25 +815,34 @@ class HistoryStoreTest : StringSpec() {
                     Document("errorCode", 2)
                 ).use {
                     shouldThrow<MongoCommandException> {
-                        f.store.recordAdopted(listOf("001-initial-setup", "002-carts"), writer, finishedAt, true) {}
+                        val ids = listOf("001-initial-setup", "002-carts")
+                        f.store.recordAdopted(ids, writer, finishedAt, true, {}) { recorded += it }
                     }
                 }
 
                 error.code shouldBe 2
                 f.history.countDocuments() shouldBe 0L
+                recorded.shouldBeEmpty()
             }
         }
 
         "a lost lock before the adoption commit records nothing and throws LockLostException" {
             Fixture().use { f ->
+                val recorded = mutableListOf<String>()
                 shouldThrow<LockLostException> {
-                    f.store.recordAdopted(listOf("001-initial-setup", "002-carts"), writer, finishedAt, true) {
-                        throw LockLostException(null)
-                    }
+                    f.store.recordAdopted(
+                        listOf("001-initial-setup", "002-carts"),
+                        writer,
+                        finishedAt,
+                        transactions = true,
+                        checkLock = { throw LockLostException(null) },
+                        recorded = { recorded += it }
+                    )
                 }.message shouldBe "Lost the migration lock"
 
                 f.history.countDocuments() shouldBe 0L
                 f.recorder.commands("commitTransaction").shouldBeEmpty()
+                recorded.shouldBeEmpty()
             }
         }
 
@@ -823,14 +855,13 @@ class HistoryStoreTest : StringSpec() {
                     if (!interfered && command.name == "update" && inTransaction) {
                         interfered = true
                         // Another run's adoption commits 002 after this transaction's snapshot was taken.
-                        other.recordAdopted(listOf("002-carts"), takeover, finishedAt, transactions = false) {}
+                        other.adopt(listOf("002-carts"), transactions = false, by = takeover)
                     }
                 })
                 Fixture(recorder).use { f ->
                     other = HistoryStore(Bookkeeping(otherClient, f.db.name, GodwitConfig(holder = takeover.holder)))
 
-                    val inserted =
-                        f.store.recordAdopted(listOf("001-initial-setup", "002-carts"), writer, finishedAt, true) {}
+                    val inserted = f.store.adopt(listOf("001-initial-setup", "002-carts"), transactions = true)
 
                     inserted shouldBe listOf("001-initial-setup")
                     f.stored("002-carts")!!.getString("owner") shouldBe takeover.owner
@@ -853,16 +884,26 @@ class HistoryStoreTest : StringSpec() {
             Fixture(recorder).use { f ->
                 val ids = listOf("001-initial-setup", "002-carts", "003-file-store")
 
-                f.store.recordAdopted(ids, writer, finishedAt, transactions = false) { events += "checkLock" } shouldBe
-                    ids.reversed()
+                f.store.recordAdopted(
+                    ids,
+                    writer,
+                    finishedAt,
+                    transactions = false,
+                    checkLock = { events += "checkLock" },
+                    recorded = { events += "recorded $it" }
+                )
 
+                // Each id is passed back as soon as its own write is acknowledged.
                 events shouldBe listOf(
                     "checkLock",
                     "write 003-file-store",
+                    "recorded 003-file-store",
                     "checkLock",
                     "write 002-carts",
+                    "recorded 002-carts",
                     "checkLock",
-                    "write 001-initial-setup"
+                    "write 001-initial-setup",
+                    "recorded 001-initial-setup"
                 )
                 recorder.commands("update").forEach { command ->
                     command.command.containsKey("autocommit") shouldBe false
@@ -872,18 +913,24 @@ class HistoryStoreTest : StringSpec() {
                 f.history.deleteMany(Document())
                 f.store.markRunning(carts, takeover, startedAt)
                 val running = f.stored("002-carts")
-                f.store.recordAdopted(ids, writer, finishedAt, transactions = false) {} shouldBe
-                    listOf("003-file-store", "001-initial-setup")
+                f.store.adopt(ids, transactions = false) shouldBe listOf("003-file-store", "001-initial-setup")
                 f.stored("002-carts") shouldBe running
 
                 f.history.deleteMany(Document())
                 var checks = 0
+                val recorded = mutableListOf<String>()
                 shouldThrow<LockLostException> {
-                    f.store.recordAdopted(ids, writer, finishedAt, transactions = false) {
-                        if (++checks == 2) throw LockLostException(null)
-                    }
+                    f.store.recordAdopted(
+                        ids,
+                        writer,
+                        finishedAt,
+                        transactions = false,
+                        checkLock = { if (++checks == 2) throw LockLostException(null) },
+                        recorded = { recorded += it }
+                    )
                 }
                 f.history.find().map { it.getString("_id") }.toList() shouldBe listOf("003-file-store")
+                recorded shouldBe listOf("003-file-store")
             }
         }
 
@@ -901,6 +948,7 @@ class HistoryStoreTest : StringSpec() {
                         "runId": "$$RUN_ID", "finishedAt": $${date(finishedAt)}, "godwitVersion": "$$version", "v": 1,
                         "supersedes": ["001-initial-setup", "002-carts"]
                       },
+                      "$unset": {"lastError": "", "checkpoint": ""},
                       "$setOnInsert": {"kind": "ONCE", "steps": [], "attempts": 0}
                     }
                     """
@@ -918,10 +966,12 @@ class HistoryStoreTest : StringSpec() {
             }
         }
 
-        "the SUPERSEDED record over a FAILED document keeps its steps and attempts" {
+        "the SUPERSEDED record over a FAILED document removes lastError and checkpoint and keeps the run's facts" {
             Fixture().use { f ->
                 f.store.markRunning(baseline, writer, startedAt)
-                f.store.markFailed("100-baseline", OWNER, FailedRun(IllegalStateException("x"), null, 1, finishedAt))
+                f.history.updateOne(eq("_id", "100-baseline"), Document("\$set", Document("checkpoint", Document())))
+                f.store.markFailed("100-baseline", OWNER, FailedRun(IllegalStateException("x"), null, 1840, finishedAt))
+                f.stored("100-baseline")!!.keys shouldContainAll listOf("lastError", "checkpoint")
 
                 f.store.recordSuperseded(baseline, takeover, finishedAt) shouldBe true
 
@@ -929,8 +979,13 @@ class HistoryStoreTest : StringSpec() {
                 stored.getString("state") shouldBe "APPLIED"
                 stored.getString("origin") shouldBe "SUPERSEDED"
                 stored.getString("owner") shouldBe takeover.owner
+                stored["supersedes"] shouldBe listOf("001-initial-setup", "002-carts")
+                stored shouldNotContainKey "lastError"
+                stored shouldNotContainKey "checkpoint"
                 stored["steps"] shouldBe listOf("OUTSIDE_TRANSACTION")
                 stored.getInteger("attempts") shouldBe 1
+                stored.getLong("durationMs") shouldBe 1840L
+                stored.getDate("startedAt") shouldBe Date.from(startedAt)
             }
         }
 

@@ -60,7 +60,10 @@ internal object Log {
             .addKeyValue("error", error.toString())
             .log()
 
-    /** [adopted] lists the ids this call recorded; [ignored] the returned ids the list does not know. */
+    /**
+     * [adopted] lists the ids this call of the hook recorded, in list order; [ignored] the ids it returned that the list
+     * neither declares as once-only nor names in a `supersedes` list, sorted.
+     */
     fun adoptedAppliedMigrations(adopted: List<String>, ignored: List<String>) =
         logger.atInfo().setMessage("Adopted applied migrations")
             .addKeyValue("adopted", adopted)

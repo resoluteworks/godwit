@@ -26,7 +26,7 @@ import godwit.core.internal.validateCall
  * | WARN  | Lock renewal failed             | runId, holder, error (the lock is held until the local deadline)       |
  * | WARN  | Lost migration lock             | runId, holder, reason (once per run)                                   |
  * | WARN  | Lock release failed             | runId, holder, error (the lease ends on its own)                       |
- * | INFO  | Adopted applied migrations      | adopted, ignored (on every call of the hook)                           |
+ * | INFO  | Adopted applied migrations      | adopted, ignored (each hook call that returns with the lock held)      |
  * | INFO  | Recorded superseded migration   | id, supersedes                                                         |
  * | WARN  | Resuming interrupted migration  | id, attempts                                                           |
  * | WARN  | Running out-of-order migration  | id, appliedAfter                                                       |
@@ -106,8 +106,8 @@ class Godwit internal constructor(
         migrate(migrations.toList(), target)
 
     /**
-     * What [migrate] with [Target.Latest] would do, without taking the lock or writing anything, except while
-     * [GodwitConfig.adoptApplied] can still run (below). [everyStart] migrations are never pending. On a database
+     * What [migrate] with [Target.Latest] would do (except while [GodwitConfig.adoptApplied] can still run, below),
+     * without taking the lock or writing anything. [everyStart] migrations are never pending. On a database
      * without godwit history every migration is pending: adoption runs only in [migrate]. While
      * [GodwitConfig.adoptApplied] can still run, the ids adoption has not recorded are pending, and neither an
      * untracked database nor an out-of-order or partial-squash conflict is reported, because the hook may resolve them.
@@ -158,8 +158,13 @@ class Godwit internal constructor(
      *   hook still runs on every start that takes the lock. The check runs under the lock, on the same history read.
      *   Nothing is written. The message is "adoption has not ended on this database; run migrate() first so the
      *   adoptApplied hook adopts, or call markApplied from a Godwit built without adoptApplied".
+     * @throws LockTimeoutException when another process holds the lock for longer than [LockConfig.waitTimeout].
+     * @throws LockLostException when the lock is lost before the write. Nothing is written.
      */
-    fun markApplied(id: String, reason: String): Unit = throw NotImplementedError("P6")
+    fun markApplied(id: String, reason: String) {
+        require(reason.isNotBlank()) { "reason must not be blank: it is the audit trail of the mark" }
+        runner.markApplied(id, reason)
+    }
 
     /** The two collections godwit owns in the database. Skip them when clearing collections between tests. */
     val bookkeepingCollections: Set<String> get() = setOf(config.historyCollection, config.lockCollection)

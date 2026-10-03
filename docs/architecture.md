@@ -72,19 +72,26 @@ migrate(migrations, target):
           returned = config.adoptApplied(database)           the app's hook
           lock.checkLock()
           adopted = declared once-only and superseded ids among returned, minus the ids history holds
-          historyStore.recordAdopted(adopted)                upserts that only insert: one withTransaction,
+          try:
+              if adopted is not empty:
+                  hello, unless this call has asked already  one transaction, or one write per id
+                  historyStore.recordAdopted(adopted)        upserts that only insert: one withTransaction,
                                                              checkLock() before the commit; on a standalone server
                                                              one write per id, checkLock() before each, last-listed
                                                              first
-          log INFO "Adopted applied migrations"              adopted, and the returned ids the list ignores
+          finally:
+              log INFO "Adopted applied migrations"          the ids recorded, in list order (on a failure, the ones
+                                                             written before it: none in a transaction), and the
+                                                             returned ids the list ignores, sorted
           history = historyStore.readAll()
       plan = planner.plan(migrations, history, target, config, adopting = false)
       if plan.conflicts: throw PlanConflictException         every conflict, an adoption gap included
-      if plan.needsTransactions and topology not checked yet and topology is standalone:
+      if plan.needsTransactions and topology is standalone:  hello, unless this call has asked already
           throw TransactionsUnsupportedException             a transactional step became due under the lock
       if plan.untracked and config.untrackedDatabase == REFUSE:
           throw UntrackedDatabaseException                   history empty, nothing adopted, collections present
-      for m in plan.toRecordAsSuperseded: historyStore.recordSuperseded(m); log INFO
+      for m in plan.toRecordAsSuperseded:                    checkLock(), then a conditional upsert; log INFO
+          historyStore.recordSuperseded(m)                   unless another run has applied it: up to date
       for m in plan.due: run(m)                              once-only in list order, then repeatable and every-start in list order
       log INFO "Migrations complete"
       return report
@@ -114,8 +121,9 @@ Points that follow from it:
   removes due migrations, but it can add one: a repeatable becomes due when a process of an older release applied its
   older revision while this one waited
   ([repeatable-migrations.md](repeatable-migrations.md#an-older-release-starts-after-a-newer-one)). When the plan made
-  under the lock has a transactional step due and the pre-lock plan had none, godwit runs `hello` then, so a standalone
-  server still gets `TransactionsUnsupportedException` rather than the driver's misleading error.
+  under the lock has a transactional step due and the pre-lock plan had none, godwit runs `hello` then (or reuses the
+  answer adoption asked for), so a standalone server still gets `TransactionsUnsupportedException` rather than the
+  driver's misleading error.
 - **Adoption completes itself.** The hook runs on every start that takes the lock while history holds nothing but
   `ADOPTED` documents, and each call records only the ids history lacks, with upserts that only insert, so a repeated
   call changes nothing recorded and removes nothing. On a replica set the documents of one call commit in one
@@ -146,6 +154,7 @@ markApplied(id, reason):
           throw IllegalStateException                        adoption has not ended; true on an empty history
       if history[id] is REPEATABLE or EVERY_START:
           throw IllegalArgumentException
+      lock.checkLock()                                       -> LockLostException, nothing written
       historyStore.recordMarked(id, reason)                  conditional upsert on state != APPLIED
       log WARN "Marked migration applied"                    only when the write changed the document
   finally:
@@ -568,9 +577,11 @@ last-listed first: in the reverse of the list's once-only order, where each migr
 
 **`SUPERSEDED` and `MARKED` records.** Under the lock, a conditional upsert on `state != APPLIED`, setting
 `state: "APPLIED"`, the origin, `holder`, `owner`, `runId`, `finishedAt`, `godwitVersion` and `v`; inserted documents
-also get `kind: "ONCE"`, `steps: []` and `attempts: 0` (`$setOnInsert`). `SUPERSEDED` stores `supersedes`; `MARKED`
-stores `reason` and removes `lastError` and `checkpoint`. A duplicate key is sent once more, as for the once-only
-marker; a second one means the id is already `APPLIED`, which leaves it unchanged.
+also get `kind: "ONCE"`, `steps: []` and `attempts: 0` (`$setOnInsert`). `SUPERSEDED` stores `supersedes` and
+`MARKED` stores `reason`; both remove `lastError` and `checkpoint`, because an `APPLIED` migration has nothing left to
+retry or resume. An existing document (an earlier run that failed or was interrupted) keeps its other fields: that
+run's `description`, `steps`, `attempts`, `startedAt` and `durationMs`. A duplicate key is sent once more, as for the
+once-only marker; a second one means the id is already `APPLIED`, which leaves it unchanged.
 `markApplied` checks the history it reads under the lock first, and writes nothing when it throws:
 `IllegalStateException` while `adoptApplied` is set and every document is `ADOPTED` (or there is none), and
 `IllegalArgumentException` when the id's document has `kind` `REPEATABLE` or `EVERY_START`, in any state.
@@ -734,9 +745,10 @@ These are fixed, not configurable ([configuration.md](configuration.md)).
 
 ## Topology check
 
-When the plan has a transactional step due, godwit runs `hello` once, before taking the lock. It runs it again under
-the lock when the plan made there has a transactional step due that the first plan did not, and before adoption
-records its documents (to choose between one transaction and one write per id):
+godwit runs `hello` at most once per call, and only when it needs the answer: before taking the lock when the plan has
+a transactional step due; otherwise under the lock, before adoption records its documents (to choose between one
+transaction and one write per id), or when the plan made there has a transactional step due that the first plan did
+not. A later question in the same call reuses the first answer:
 
 | `hello` reply | Deployment | Transactions |
 |---|---|---|
@@ -745,8 +757,8 @@ records its documents (to choose between one transaction and one write per id):
 | neither | standalone `mongod` | no: `TransactionsUnsupportedException` listing the due migrations that need them |
 
 Without the check, a standalone server rejects the first transactional operation with an error the driver rewrites
-into a misleading message about retryable writes. A list whose due migrations are all outside-only skips the check and
-runs on a standalone server.
+into a misleading message about retryable writes. A list whose due migrations are all outside-only is never refused and
+runs on a standalone server; it sends `hello` only when adoption has ids to record.
 
 ## Compatibility
 
@@ -939,8 +951,9 @@ the writing process; `durationMs` uses the monotonic clock.
 
 ### Check the topology only when needed
 
-`hello` runs only when a transactional step is due, so a start with nothing due stays one query, and outside-only
-migrations work on a standalone development server.
+`hello` runs only when an answer is needed: a transactional step is due, or adoption has ids to record and must choose
+between one transaction and one write per id. A start with nothing due stays one query, and outside-only migrations
+work on a standalone development server.
 
 ## See also
 

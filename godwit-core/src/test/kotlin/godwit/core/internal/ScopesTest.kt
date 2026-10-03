@@ -1,7 +1,10 @@
 package godwit.core.internal
 
 import com.mongodb.kotlin.client.ClientSession
+import com.mongodb.kotlin.client.MongoCluster
 import com.mongodb.kotlin.client.MongoDatabase
+import godwit.core.Godwit
+import godwit.core.GodwitConfig
 import godwit.core.LockLostException
 import godwit.core.OutsideTransactionScope
 import godwit.core.TransactionScope
@@ -39,6 +42,21 @@ class ScopesTest : StringSpec() {
             context.counts shouldBe mapOf("n" to 6L)
             shouldThrow<LockLostException> { outside.checkLock() }.id shouldBe "001-x"
             shouldThrow<LockLostException> { transaction.checkLock() }.id shouldBe "001-x"
+        }
+
+        "the scopes and Godwit keep what they were given" {
+            val database = mockk<MongoDatabase>()
+            val outside = OutsideTransactionScope("001-initial-setup", database, StepContext {})
+            val transaction = TransactionScope("004-order-status", database, mockk<ClientSession>(), 1, StepContext {})
+            val godwit = Godwit(mockk<MongoCluster>(), "shop", GodwitConfig(holder = "shop-7f9c4/1"))
+            outside.id shouldBe "001-initial-setup"
+            outside.database shouldBe database
+            transaction.id shouldBe "004-order-status"
+            transaction.attempt shouldBe 1
+            godwit.databaseName shouldBe "shop"
+            godwit.bookkeepingCollections shouldBe setOf("godwit-history", "godwit-lock")
+            Godwit(mockk(), "shop", GodwitConfig(historyCollection = "h", lockCollection = "l", holder = "x/1"))
+                .bookkeepingCollections shouldBe setOf("h", "l")
         }
     }
 }

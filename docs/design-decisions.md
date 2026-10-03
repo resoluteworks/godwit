@@ -454,8 +454,9 @@ Outside-only migrations run on a standalone server.
 being able to tell. Failing always would block lists that never need a transaction. A single-node replica set costs one
 flag and one command.
 
-**Consequences.** The check runs `hello` only when a transactional step is due, so a start with nothing due stays one
-query.
+**Consequences.** The check that can refuse a call runs `hello` only when a transactional step is due, so a start with
+nothing due stays one query. Adoption sends `hello` too when it has ids to record, to choose between one transaction
+and one write per id; the call reuses that answer, so it sends `hello` at most once.
 
 **In depth.** [Transactions and sessions](transactions-and-sessions.md#fail-on-a-standalone-server-only-when-needed).
 

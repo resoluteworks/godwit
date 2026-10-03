@@ -10,6 +10,7 @@ import godwit.core.HistoryState
 import godwit.core.LockLostException
 import godwit.core.Migration
 import godwit.core.MigrationFailedException
+import godwit.core.MigrationKind
 import godwit.core.MigrationOutcome
 import godwit.core.MigrationReport
 import godwit.core.MigrationStatus
@@ -57,8 +58,9 @@ internal data class Tuning(
  * run. The APPLIED record ([HistoryStore.recordApplied]) stores a repeatable's `revision` and removes it for every
  * other kind, and stores `lastRunAt` and increments `runCount` for a repeatable or every-start migration.
  *
- * A plan that needs a later phase's machinery is refused under the lock, before anything runs or is recorded: the
- * adoption hook to call, or a squash to record.
+ * Under the lock, before the plan that runs is made, [Adoption] calls the adoption hook while history holds nothing
+ * but ADOPTED documents; the plan then records its superseded squashes before it runs anything. `markApplied` takes
+ * the same lock for its one write.
  */
 internal class Runner(
     private val cluster: MongoCluster,
@@ -119,6 +121,33 @@ internal class Runner(
     /** Every history document, sorted by id. */
     fun history(): List<HistoryEntry> = store.readAll().map { it.toHistoryEntry(store.codecs) }
 
+    /**
+     * Records the once-only migration [id] APPLIED with origin MARKED and [reason], under the lock, from the history
+     * read there: refused while adoption can still run ([IllegalStateException]) and for a repeatable or every-start
+     * document in any state ([IllegalArgumentException]), with nothing written. A document that is APPLIED already
+     * stays as it is, and nothing is logged. [reason] is not blank: the caller has checked it.
+     */
+    fun markApplied(id: String, reason: String) {
+        val runId = UUID.randomUUID().toString()
+        val lock = MongoLock(bookkeeping, config.lock, config.holder).acquire(runId)
+        try {
+            val history = readHistory()
+            check(!adoptionCanRun(config, history)) { ADOPTION_NOT_ENDED }
+            val kind = history.firstOrNull { it.id == id }?.kind
+            require(kind == null || kind == StoredKind.ONCE) {
+                "$id is $kind in history; markApplied records once-only migrations only. A repeatable or " +
+                    "every-start migration is due whatever its history says: fix it in code, or remove it from the list"
+            }
+            lock.checkLock(null)
+            val writer = Writer(lock.owner, config.holder, runId)
+            if (store.recordMarked(id, reason, writer, Instant.now())) {
+                Log.markedMigrationApplied(id, reason, config.holder)
+            }
+        } finally {
+            lock.release()
+        }
+    }
+
     private fun readHistory(): List<HistoryRecord> = store.readAll().map { it.toHistoryRecord() }
 
     /**
@@ -141,18 +170,31 @@ internal class Runner(
 
         val ran = mutableListOf<MigrationOutcome>()
 
+        /** Adopted ids in list order, then recorded squashes in list order. */
+        val recorded = mutableListOf<MigrationOutcome>()
+
         val upToDate = mutableListOf<String>()
 
-        /** Reads history again under the lock, plans from it and runs what is due, in run order. */
+        /**
+         * Reads history again under the lock, adopts while adoption can run and reads history once more, plans from
+         * it, records the superseded squashes and runs what is due, in run order.
+         */
         fun run(migrations: List<Migration>, target: Target, topology: Topology): MigrationReport {
-            val history = readHistory()
-            if (adoptionCanRun(config, history)) throw NotImplementedError("P6")
+            var history = readHistory()
+            val hook = config.adoptApplied
+            val adopted = if (hook != null && adoptionCanRun(config, history)) {
+                Adoption(hook, database, store, topology).adopt(migrations, history, lock, writer)
+                    .also { history = readHistory() }
+            } else {
+                emptyList()
+            }
             val plan = plan(migrations, history, target, config, adopting = false)
             if (plan.conflicts.isNotEmpty()) throw PlanConflictException(plan.conflicts)
             topology.requireTransactions(plan)
             untrackedRefusal(plan)?.let { throw it }
-            if (plan.superseded.isNotEmpty()) throw NotImplementedError("P6")
-            upToDate += plan.upToDate
+            recorded += adopted.map { recordedOutcome(it, MigrationKind.Once, Origin.ADOPTED) }
+            upToDate += plan.upToDate - adopted.toSet()
+            plan.superseded.forEach(::recordSuperseded)
             val previous = history.associateBy { it.id }
             for (due in plan.due) {
                 val outcome = MigrationRun(this, plan, due, previous[due.migration.id]).run()
@@ -170,11 +212,25 @@ internal class Runner(
             return report
         }
 
+        /**
+         * Records the superseding [migration] SUPERSEDED without running it, after a lock check. A document another
+         * run has applied meanwhile is left as it is, and the migration is up to date.
+         */
+        private fun recordSuperseded(migration: Migration) {
+            lock.checkLock(migration.id)
+            if (store.recordSuperseded(migration, writer, Instant.now())) {
+                Log.recordedSupersededMigration(migration.id, migration.supersedes)
+                recorded += recordedOutcome(migration.id, migration.kind, Origin.SUPERSEDED)
+            } else {
+                upToDate += migration.id
+            }
+        }
+
         /** What this call has done so far, for the result or for the exception that ends it. */
         fun report(plan: Plan) = MigrationReport(
             runId,
             ran.toList(),
-            emptyList(),
+            recorded.toList(),
             upToDate.toList(),
             plan.pending,
             plan.unknownApplied,
@@ -450,6 +506,14 @@ internal class Runner(
  * step the pages committed over every attempt.
  */
 internal class Applied(val counts: Map<String, Long>, val transactionRetries: Int, val batches: Int = 0)
+
+/** The message of the [IllegalStateException] `markApplied` throws while adoption can still run. */
+internal const val ADOPTION_NOT_ENDED = "adoption has not ended on this database; run migrate() first so the " +
+    "adoptApplied hook adopts, or call markApplied from a Godwit built without adoptApplied"
+
+/** A migration this call recorded without running it: no steps, no attempts, no counts, no duration. */
+private fun recordedOutcome(id: String, kind: MigrationKind, origin: Origin) =
+    MigrationOutcome(id, kind, origin, emptyList(), 0, 0, 0, emptyMap(), false, Duration.ZERO)
 
 /** The document when it is APPLIED and the run whose lock token is [owner] wrote it; null otherwise. */
 private fun Document?.appliedBy(owner: String): Document? =

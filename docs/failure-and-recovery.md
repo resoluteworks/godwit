@@ -680,6 +680,11 @@ in a `GodwitException`. What is left depends on which write failed:
   still behind when the `FAILED` write's own `timeoutMS` passed. `migrate` throws `MigrationFailedException` for the
   step's failure, with the history write's exception attached as a suppressed exception. The next start logs
   `Resuming interrupted migration` and retries, or finds the migration applied.
+- **The `ADOPTED` records.** On a replica set they are one transaction, and a failure that is not transient leaves
+  none of them. On a standalone server the ids written before the failure stay recorded. Either way godwit logs
+  `Adopted applied migrations` with the ids recorded (none in the transaction's case), then throws the driver's
+  exception. History holds nothing but `ADOPTED` documents, so the next start calls the hook again and records what is
+  missing.
 - **The release.** The lease ends on its own within 60 s; the next start waits at most that long.
 
 The `APPLIED` record of a transactional step is written inside the transaction: it commits with the step's writes or

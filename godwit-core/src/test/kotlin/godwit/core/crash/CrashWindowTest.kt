@@ -81,8 +81,8 @@ class CrashWindowTest : StringSpec() {
             }
         }
 
-        "every crash point has its window" {
-            windows.keys shouldBe CrashPoint.entries.toSet()
+        "every crash point of the migrations scenario has its window" {
+            windows.keys shouldBe CrashPoint.entries.filter { it.scenario == CrashScenario.MIGRATIONS }.toSet()
         }
     }
 }

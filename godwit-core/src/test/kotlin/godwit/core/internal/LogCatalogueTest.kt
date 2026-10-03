@@ -7,6 +7,7 @@ import godwit.core.MigrationFailedException
 import godwit.core.OutOfOrder
 import godwit.core.StepKind
 import godwit.core.everyStart
+import godwit.core.fixtures.CountingHook
 import godwit.core.fixtures.GodwitFixture
 import godwit.core.fixtures.LogCapture
 import godwit.core.fixtures.TestMongo
@@ -324,6 +325,44 @@ class LogCatalogueTest : StringSpec() {
                         listOf(listOf("countriesRemoved"), listOf("usersChecked", "customersCreated"))
                     logs.events("Resuming interrupted migration").single().line shouldBe
                         "Resuming interrupted migration id=reference-countries attempts=2"
+                }
+            }
+        }
+
+        "every event of adoption, squashes and marks has its catalogue level and keys" {
+            val catalogue = kdocCatalogue().associateBy { it.message }
+            val hook = CountingHook("001-old", "002-old", "2025-02-cart-index-hotfix")
+            GodwitFixture(appName = "catalogue-adoption", config = GodwitConfig(adoptApplied = hook)).use { f ->
+                val baseline = migration("100-baseline", supersedes = listOf("001-old", "002-old")).outsideTransaction {
+                }
+
+                LogCapture().use { logs ->
+                    f.godwit.migrate(baseline, migration("101-new").outsideTransaction { })
+                    f.godwit.markApplied("102-by-hand", "built by hand")
+
+                    logs.events.map { it.message } shouldBe listOf(
+                        "Acquired migration lock",
+                        "Adopted applied migrations",
+                        "Recorded superseded migration",
+                        "Running migration",
+                        "Applied migration",
+                        "Migrations complete",
+                        "Acquired migration lock",
+                        "Marked migration applied"
+                    )
+                    logs.events.forEach { event ->
+                        withClue(event.line) {
+                            val row = catalogue.getValue(event.message)
+                            event.level.toString() shouldBe row.level
+                            event.keyValues.keys.toList().take(row.keys.size) shouldBe row.keys
+                        }
+                    }
+                    logs.single("Adopted applied migrations").line shouldBe
+                        "Adopted applied migrations adopted=[001-old, 002-old] ignored=[2025-02-cart-index-hotfix]"
+                    logs.single("Recorded superseded migration").line shouldBe
+                        "Recorded superseded migration id=100-baseline supersedes=[001-old, 002-old]"
+                    logs.single("Marked migration applied").line shouldBe
+                        "Marked migration applied id=102-by-hand reason=built by hand holder=catalogue-adoption/1"
                 }
             }
         }

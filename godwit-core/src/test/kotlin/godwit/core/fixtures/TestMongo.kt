@@ -110,12 +110,17 @@ object TestMongo {
         }
     }
 
+    /**
+     * Starts the replica set, replacing the container when it fails to start: the container's own wait for the replica
+     * set's primary is about 6 s, which a loaded machine can miss.
+     */
     private fun start(): Started {
-        val container = MongoDBContainer(image)
-            .withReplicaSet()
-            .withCommand("--replSet", REPLICA_SET_NAME, "--setParameter", "enableTestCommands=1")
         val begin = System.nanoTime()
-        container.start()
+        val container = startWithRetries("test replica set") {
+            MongoDBContainer(image)
+                .withReplicaSet()
+                .withCommand("--replSet", REPLICA_SET_NAME, "--setParameter", "enableTestCommands=1")
+        }
         val startupMs = (System.nanoTime() - begin) / 1_000_000
         Runtime.getRuntime().addShutdownHook(Thread { container.stop() })
         log.debug("started image={} startupMs={}", image, startupMs)

@@ -104,13 +104,12 @@ INFO  godwit - Running migration id=100-baseline kind=ONCE steps=[OUTSIDE_TRANSA
 INFO  godwit - Applied migration id=100-baseline kind=ONCE steps=[OUTSIDE_TRANSACTION] attempts=1 txRetries=0 batches=0 durationMs=1840
 ```
 
-Either way, the baseline's history document stores the `supersedes` list. These are the two documents, abbreviated to the fields that matter here:
+Either way, the baseline's history document stores the `supersedes` list. These are the two documents, abbreviated to the fields that matter here. A recorded baseline did not run, so its document has no `description`, `durationMs` or `transactionRetries`, except the `description` and `durationMs` of an earlier run that failed on the same database ([the baseline failed, then a rollback applied the six](#the-baseline-failed-then-a-rollback-applied-the-six)); the run that applied the baseline on a new database wrote all three:
 
 ```json
 {
   "_id": "100-baseline",
   "kind": "ONCE",
-  "description": "End state of 001 to 006",
   "steps": [],
   "state": "APPLIED",
   "origin": "SUPERSEDED",
@@ -236,6 +235,7 @@ The baseline fails only where it runs: on a database where none of the replaced 
 - It is recorded `FAILED` with `lastError`, and `migrate` throws `MigrationFailedException`.
 - The next start runs its outside step again from the beginning, so every call in it must be idempotent. The baseline above uses `ensureCollection`, `createIndexes` with fixed specs and `ensureSearchIndex`, all of which converge.
 - Where it does not run (a migrated database), recording it is a history write. If the write fails the driver's exception propagates, nothing is recorded, and the next start records it.
+- A failed baseline stays due. If the replaced ids are applied before it runs again (a rollback to the previous release applies them), the next start records it instead of running it, and the record removes its `lastError` and `checkpoint` ([edge case](#the-baseline-failed-then-a-rollback-applied-the-six)).
 
 Example: a new database, and `ensureSearchIndex(..., awaitReady = 5.minutes)` throws `SearchIndexNotReadyException` after the baseline created its collections and indexes. History holds `100-baseline` as `FAILED`. The next start runs the outside step again: `ensureCollection` returns false for the existing collections, `createIndexes` finds identical indexes, and `ensureSearchIndex` finds the index and waits for it again.
 
@@ -379,6 +379,12 @@ WARN  godwit - Unknown applied migrations ids=[100-baseline]
 - **State:** a database was built by release N (the baseline ran, so history has no `001` to `006`), and release N-1 is deployed to it.
 - **godwit:** N-1 declares `001` to `006`, none applied, so they are pending and run in order. They are safe over the baseline's schema: the DDL is idempotent and the backfills find nothing to change. `100-baseline` is reported as unknown applied. If N-1 fails part-way (say at `004`, with `001` to `003` applied) and release N is deployed again, `100-baseline` is already `APPLIED`, so its `supersedes` list is not evaluated: three of six applied is no conflict.
 - **You:** nothing. The squash contract is that the replaced migrations and the baseline converge on the same schema.
+
+### The baseline failed, then a rollback applied the six
+
+- **State:** release N started on a new database and `100-baseline` failed: its document is `FAILED`, with `lastError`, and with a `checkpoint` if an `inBatches` step committed pages. Release N-1 was deployed again and applied `001` to `006`. A `FAILED` document is not `APPLIED`, so N-1 does not report `100-baseline` as unknown. Release N starts again.
+- **godwit:** all six replaced ids are applied, so it records `100-baseline` as `SUPERSEDED` over the failed run's document, without running it. The record removes `lastError` and `checkpoint`, because nothing is left to retry or resume. The failed run's `description`, `steps`, `attempts`, `startedAt` and `durationMs` stay, as they do when `markApplied` records a failed migration ([history-and-reports.md](history-and-reports.md#applied-by-hand-marked)).
+- **You:** nothing. The six converge on the schema the baseline describes.
 
 ### Restoring a backup from before the squash
 

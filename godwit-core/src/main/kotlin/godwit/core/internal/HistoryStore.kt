@@ -213,21 +213,25 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
 
     /**
      * Records each of [ids] APPLIED with origin ADOPTED, with upserts that only insert: every field is in
-     * `$setOnInsert`, so a document that exists, in any state, is left unchanged. Returns the ids this call inserted.
+     * `$setOnInsert`, so a document that exists, in any state, is left unchanged. Passes each id this call inserted to
+     * [recorded] once its write is durable, so that a caller whose call throws still knows what it recorded.
      *
      * [ids] are in list order: the once-only order, each migration preceded by the ids its `supersedes` list names, in
      * that list's order. With [transactions] (a replica set or `mongos`) they are written in one transaction through
      * the driver's `withTransaction`, with [checkLock] before the commit: a transient error is retried in the same
-     * call, and any other error, a lost lock included, leaves nothing recorded and propagates. Without (a standalone
-     * server) they are written one at a time, last-listed first, with [checkLock] before each.
+     * call, and any other error, a lost lock included, leaves nothing recorded and propagates; the inserted ids go to
+     * [recorded] after the commit, in list order. Without (a standalone server) they are written one at a time,
+     * last-listed first, with [checkLock] before each, and each inserted id goes to [recorded] after its write, so an
+     * error part-way leaves the ids [recorded] has seen and propagates.
      */
     fun recordAdopted(
         ids: List<String>,
         writer: Writer,
         finishedAt: Instant,
         transactions: Boolean,
-        checkLock: () -> Unit
-    ): List<String> {
+        checkLock: () -> Unit,
+        recorded: (String) -> Unit
+    ) {
         val insert = Document(
             "\$setOnInsert",
             onceOnlyRecord(Origin.ADOPTED, writer, finishedAt)
@@ -237,12 +241,13 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
         )
         val options = UpdateOptions().upsert(true)
         if (!transactions) {
-            return ids.asReversed().filter { id ->
+            for (id in ids.asReversed()) {
                 checkLock()
-                collection.updateOne(Document("_id", id), insert, options).upsertedId != null
+                if (collection.updateOne(Document("_id", id), insert, options).upsertedId != null) recorded(id)
             }
+            return
         }
-        return bookkeeping.startSession().use { session ->
+        val inserted = bookkeeping.startSession().use { session ->
             session.withTransaction(
                 {
                     val inserted = ids.filter { id ->
@@ -254,17 +259,19 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
                 TRANSACTION_OPTIONS
             )
         }
+        inserted.forEach(recorded)
     }
 
     /**
      * Records the superseding [migration] APPLIED with origin SUPERSEDED and its `supersedes` list, without running
-     * it: an upsert conditional on `state != APPLIED`, sent once more after a duplicate key ([unlessApplied]); a
-     * document it inserts also gets `kind: ONCE`, `steps: []` and `attempts: 0`. False when the document is already
-     * APPLIED, which leaves it unchanged.
+     * it, removing `lastError` and `checkpoint`: an upsert conditional on `state != APPLIED`, sent once more after a
+     * duplicate key ([unlessApplied]); a document it inserts also gets `kind: ONCE`, `steps: []` and `attempts: 0`,
+     * and an existing one (an earlier run of the migration that failed or was interrupted) keeps its other fields.
+     * False when the document is already APPLIED, which leaves it unchanged.
      */
     fun recordSuperseded(migration: Migration, writer: Writer, finishedAt: Instant): Boolean {
         val set = onceOnlyRecord(Origin.SUPERSEDED, writer, finishedAt).append("supersedes", migration.supersedes)
-        return recordOnceOnly(migration.id, Document("\$set", set))
+        return recordOnceOnly(migration.id, set)
     }
 
     /**
@@ -275,17 +282,20 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
      */
     fun recordMarked(id: String, reason: String, writer: Writer, finishedAt: Instant): Boolean {
         val set = onceOnlyRecord(Origin.MARKED, writer, finishedAt).append("reason", reason)
-        return recordOnceOnly(
-            id,
-            Document("\$set", set).append("\$unset", Document("lastError", "").append("checkpoint", ""))
-        )
+        return recordOnceOnly(id, set)
     }
 
-    private fun recordOnceOnly(id: String, update: Document): Boolean {
-        update.append(
-            "\$setOnInsert",
-            Document("kind", StoredKind.ONCE.name).append("steps", emptyList<String>()).append("attempts", 0)
-        )
+    /**
+     * The conditional upsert of a once-only record that did not run: [set], with `lastError` and `checkpoint` removed
+     * (the migration is APPLIED, so nothing is left to retry or resume) and the fields a new document needs.
+     */
+    private fun recordOnceOnly(id: String, set: Document): Boolean {
+        val update = Document("\$set", set)
+            .append("\$unset", Document("lastError", "").append("checkpoint", ""))
+            .append(
+                "\$setOnInsert",
+                Document("kind", StoredKind.ONCE.name).append("steps", emptyList<String>()).append("attempts", 0)
+            )
         return unlessApplied { collection.updateOne(notApplied(id), update, UpdateOptions().upsert(true)) } != null
     }
 

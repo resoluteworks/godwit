@@ -25,7 +25,10 @@ object CrashHarness {
     /** How long the child may take to start, connect and reach its point. */
     private const val REACH_TIMEOUT_SECONDS = 60L
 
-    /** Runs [crashScenario] ([main] in CrashMain.kt) and kills the child at [point]. */
+    /**
+     * Runs the scenario of [point] ([main] in CrashMain.kt) against the server at [connectionString], a replica set or
+     * a standalone server, and kills the child at [point].
+     */
     fun crashAt(point: CrashPoint, connectionString: String, databaseName: String): CrashedChild =
         crash("godwit.core.crash.CrashMainKt", point.name, connectionString, databaseName)
 

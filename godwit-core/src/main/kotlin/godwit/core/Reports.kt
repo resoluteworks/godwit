@@ -38,7 +38,10 @@ class MigrationOutcome internal constructor(
     val origin: Origin,
     /** The steps that ran; empty for an adopted or superseded migration. */
     val steps: List<StepKind>,
-    /** Runs started since the migration was last APPLIED, this one included: 1 unless earlier runs failed. */
+    /**
+     * Runs started since the migration was last APPLIED, this one included: 1 unless earlier runs failed. 0 for an
+     * adopted or superseded migration, which did not run.
+     */
     val attempts: Int,
     /** Driver retries of transaction bodies in this call, over every transaction of the migration. */
     val transactionRetries: Int,
@@ -51,6 +54,7 @@ class MigrationOutcome internal constructor(
     val counts: Map<String, Long>,
     /** True when it ran under [OutOfOrder.RUN] before an applied migration listed after it. */
     val outOfOrder: Boolean,
+    /** This call's run of the migration; zero for an adopted or superseded migration. */
     val duration: Duration
 ) {
     /** The counter [name]; 0 when the steps never counted it. */

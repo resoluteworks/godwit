@@ -68,17 +68,17 @@ majority read concern on the primary, at the start of every call.
 | `_id` | String | always | The migration id |
 | `kind` | String | always | `ONCE`, `EVERY_START` or `REPEATABLE`. In Kotlin, `HistoryEntry.kind` and `Migration.kind` are a `MigrationKind`: `MigrationKind.Once`, `MigrationKind.EveryStart` or `MigrationKind.Repeatable(revision)` |
 | `revision` | String | repeatable, when a run applies it; removed when a run of another kind applies | The revision that was last applied. A different revision in code makes it due |
-| `description` | String | when declared | The migration's description as of the last run |
-| `steps` | [String] | always | `OUTSIDE_TRANSACTION`, `IN_TRANSACTION`, `IN_BATCHES`, in order, as of the last run. Empty for a migration recorded without running |
+| `description` | String | when a run starts, if the migration declares one | The migration's description as of the last run |
+| `steps` | [String] | always | `OUTSIDE_TRANSACTION`, `IN_TRANSACTION`, `IN_BATCHES`, in order, as of the last run. Empty for a migration recorded without ever running |
 | `state` | String | always | `RUNNING`, `FAILED` or `APPLIED` |
 | `origin` | String | always | `RAN`, `ADOPTED`, `SUPERSEDED` or `MARKED`: how it came to be (or is becoming) `APPLIED` |
-| `attempts` | Int | always | Runs started since the last `APPLIED`, the current one included. 0 for a migration recorded without running |
+| `attempts` | Int | always | Runs started since the last `APPLIED`, the current one included. 0 for a migration recorded without ever running |
 | `transactionRetries` | Int | when a run applies it | Driver retries of transaction bodies in the run that applied it, over every transaction (every page of an `inBatches` step) |
 | `counts` | Document | when a run applies it | The counters the steps set with `count`, such as `{ordersUpdated: 1199873}` |
 | `durationMs` | Long | after a run | Duration of the last run, applied or failed, on the monotonic clock |
 | `startedAt`, `finishedAt` | Date | `startedAt` when a run starts, `finishedAt` when it applies or fails | The writing process's clock. Informational |
-| `lastError` | Document | when a run fails | `{type, message, stack, step, at}`. Kept while the migration is retried, removed when it applies |
-| `checkpoint` | Document | `inBatches`, with each page | `{lastId, batches, counts}`: the last committed page. Removed when it applies |
+| `lastError` | Document | when a run fails | `{type, message, stack, step, at}`. Kept while the migration is retried, removed when it applies or is recorded `APPLIED` (`SUPERSEDED`, `MARKED`) |
+| `checkpoint` | Document | `inBatches`, with each page | `{lastId, batches, counts}`: the last committed page. Removed when it applies or is recorded `APPLIED` (`SUPERSEDED`, `MARKED`) |
 | `runCount`, `lastRunAt` | Long, Date | repeatable and every-start, when a run applies it | Successful runs, and when the last one finished |
 | `supersedes` | [String] | superseding migrations | The ids it replaces, stored so they stay known after the code drops the list |
 | `outOfOrder` | Boolean | when true | It ran under `OutOfOrder.RUN` behind an applied migration listed after it |
@@ -248,6 +248,11 @@ A shop database migrated by hand before godwit, with `003-file-store` in its `sc
 On a new database, `100-baseline` runs instead: `origin` is `RAN`, `steps` is `["OUTSIDE_TRANSACTION"]`, and the
 `supersedes` list is stored all the same. The documents of `001` to `006` stay where they exist; the stored list keeps
 those ids known, so they never show up as unknown applied ids, even after the code drops the `supersedes` list.
+
+A baseline recorded over the document of an earlier run that failed or was interrupted on the same database
+([squashing-migrations.md](squashing-migrations.md#the-baseline-failed-then-a-rollback-applied-the-six)) loses that
+run's `lastError` and `checkpoint` and keeps its `description`, `steps`, `attempts`, `startedAt` and `durationMs`, as
+a `MARKED` record does.
 
 ### `APPLIED` by hand (`MARKED`)
 
@@ -440,12 +445,12 @@ In tests, the counts are the assertions (`outcome.count("ordersPaid") shouldBe 1
 | `id`, `kind` | As declared |
 | `origin` | `RAN`, `ADOPTED` or `SUPERSEDED` |
 | `steps` | The steps that ran; empty for a recorded migration |
-| `attempts` | Runs started since it was last applied, this one included: 1 unless earlier runs failed or were interrupted |
+| `attempts` | Runs started since it was last applied, this one included: 1 unless earlier runs failed or were interrupted. 0 for a recorded migration |
 | `transactionRetries` | Driver retries of transaction bodies in this call, over every transaction of the migration |
 | `batches` | Pages committed by an `inBatches` step, over every attempt; a last read that finds nothing is not a page. 0 for other migrations |
 | `counts`, `count(name)` | The counters, and one counter (0 when never set) |
 | `outOfOrder` | True when it ran under `OutOfOrder.RUN` behind an applied migration listed after it |
-| `duration` | This call's run of the migration |
+| `duration` | This call's run of the migration; zero for a recorded migration |
 
 When a migration fails, `migrate` throws `MigrationFailedException` instead of returning. Its `report` covers what the
 call did before the failure (the migrations that ran and applied), its `id` and `step` name the failure, and its cause
@@ -453,8 +458,8 @@ is the step's exception ([failure-and-recovery.md](failure-and-recovery.md)).
 
 ## `status()` and `requireUpToDate()`
 
-`status(migrations)` says what `migrate` with `Target.Latest` would do, without taking the lock or writing anything,
-except while the adoption hook can still run ([edge cases](#edge-cases)). It validates the list first (and throws
+`status(migrations)` says what `migrate` with `Target.Latest` would do (except while the adoption hook can still run,
+see [edge cases](#edge-cases)), without taking the lock or writing anything. It validates the list first (and throws
 `InvalidMigrationsException` for an invalid one), then reads history.
 
 | Property | Meaning |
@@ -653,7 +658,7 @@ Every log line in these docs prints its values the same way:
 | WARN | Lock renewal failed | `runId`, `holder`, `error` (the run holds the lock until its local deadline) | `Lock renewal failed runId=0199a4c2-... holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
 | WARN | Lost migration lock | `runId`, `holder`, `reason` (once per run) | `Lost migration lock runId=0199a4c2-... holder=shop-7f9c4/1 reason=DEADLINE_PASSED` |
 | WARN | Lock release failed | `runId`, `holder`, `error` (the lease ends on its own) | `Lock release failed runId=0199a4c2-... holder=shop-7f9c4/1 error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
-| INFO | Adopted applied migrations | `adopted` (the ids this call recorded), `ignored`; logged on every call of the hook | `Adopted applied migrations adopted=[001-initial-setup, 002-carts, 003-file-store] ignored=[2025-02-cart-index-hotfix]` |
+| INFO | Adopted applied migrations | `adopted` (the ids this call recorded, in list order), `ignored`; logged after every call of the hook that returns with the lock held, also when recording the ids then fails (on a standalone server, the ids written before the failure are listed; in a transaction that fails, none are) | `Adopted applied migrations adopted=[001-initial-setup, 002-carts, 003-file-store] ignored=[2025-02-cart-index-hotfix]` |
 | INFO | Recorded superseded migration | `id`, `supersedes` | `Recorded superseded migration id=100-baseline supersedes=[001-initial-setup, ..., 006-order-totals]` |
 | WARN | Resuming interrupted migration | `id`, `attempts` | `Resuming interrupted migration id=006-order-totals attempts=2` |
 | WARN | Running out-of-order migration | `id`, `appliedAfter` | `Running out-of-order migration id=007-product-slugs appliedAfter=[008-cart-currency]` |
