@@ -177,7 +177,7 @@ run(m):
       prepared = m.outsideStep?.invoke(OutsideTransactionScope)     no session; counters of this run
       lock.checkLock()
       when m.transactionalStep:
-          none          -> historyStore.recordApplied(m, counts)     outside any transaction, fenced on owner
+          none          -> nothing here: the APPLIED record follows the try, as godwit's own write
           inTransaction -> session.withTransaction(snapshot, majority, primary) {
                                attempt += 1                                  per run of the body
                                if attempt > 1: sleep(backoff(attempt))       5 ms x 1.5 per run, at most 500 ms, jitter
@@ -188,21 +188,32 @@ run(m):
                                historyStore.recordApplied(session, m, counts + scope.counts)   fenced: matches 0 -> LockLostException
                            }
           inBatches     -> pages(m, doc.checkpoint)
-      log INFO "Applied migration"
   catch e:
       if e is LockLostException:                                           checkLock() or a fence stopped the step
           log ERROR "Migration failed"; throw e                            no history write
       if the lock is lost by now:                                          a step error and a lock loss together
           historyStore.markFailed(m, e)                                    fenced: matches only while no other run has
-                                                                           taken the document over
+                                                                           taken the document over and no commit applied
           log ERROR "Migration failed"; throw LockLostException(m.id, cause = e)
       if historyStore.markFailed(m, e) matched nothing:                    outside any transaction, fenced on owner and RUNNING
-          doc = historyStore.read(m.id)                                    primary
+          doc = historyStore.read(m.id)                                    majority read concern, primary, after the
+                                                                           no-op's majority wait
           if doc is APPLIED with this run's owner:                         the commit applied; only its reply failed
               log INFO "Applied migration"; continue with the next migration
           log ERROR "Migration failed"; throw LockLostException(m.id, cause = e)   another run owns the document
       log ERROR "Migration failed"
       throw MigrationFailedException(m.id, step, report so far, e, guidance(e))
+  if m has no transactional step:
+      try: historyStore.recordApplied(m, counts)                     outside any transaction, fenced on owner and RUNNING
+      catch LockLostException: log ERROR "Migration failed"; throw   the fence matched nothing: another run owns it
+      catch a driver error d:                                        godwit's own write, not a step failure
+          try: historyStore.recordApplied(m, counts)                 the same fenced write, once more, majority
+          catch LockLostException:                                   matched nothing: acknowledged once the first
+                                                                     write (if it applied) is majority-committed
+              doc = historyStore.read(m.id)                          majority read concern, primary
+              if doc is not APPLIED with this run's owner: throw d   another run owns the document
+          catch another error e: throw d, with e suppressed          the next start finds it APPLIED or resumes it
+  log INFO "Applied migration"
 ```
 
 - The `RUNNING` marker is written before any step, outside any transaction, with majority write concern, on the same
@@ -222,13 +233,36 @@ run(m):
   or a fence) writes nothing.
 - The driver can throw after a commit that applied: a client-side `timeoutMS` that ends during the commit's majority
   wait (the driver does not retry a `MongoOperationTimeoutException` on commit), or commit retries that run out of the
-  120 s window. The same holds for the `APPLIED` record of an outside-only migration and for the last page of an
-  `inBatches` step. The `FAILED` write is therefore fenced on `state: RUNNING` as well as the owner: on a document that
-  the failed-looking commit made `APPLIED`, it matches nothing, and godwit reads the document instead of recording a
-  failure. Without the state in the fence, the next start would find `FAILED` and run the transactional step again.
-- If the `FAILED` write itself fails, the document stays `RUNNING` and the `MigrationFailedException` (or the
-  `LockLostException`) carries the write's exception as a suppressed exception. Other history and lock write failures
-  propagate as the driver's exceptions ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
+  120 s window. The same holds for the last page of an `inBatches` step. The `FAILED` write is therefore fenced on
+  `state: RUNNING` as well as the owner: on a document that the failed-looking commit made `APPLIED`, it matches
+  nothing, and godwit reads the document instead of recording a failure. Without the state in the fence, the next
+  start would find `FAILED` and run the transactional step again. The `FAILED` write has majority write concern, and
+  the server acknowledges a write that matches nothing only once everything before it, the commit included, is
+  majority-committed; the read that follows, with majority read concern, therefore sees the commit. A majority read
+  right after the commit's timeout could not: while the majority lags, the commit is not majority-committed yet.
+- Commit retries that run out of the 120 s window mean the primary or the majority was out of reach for that long.
+  The heartbeat's renewals, majority writes on the same client, fail with them, so under the default lease the local
+  deadline (50 s after the last renewal was sent) has passed by then. godwit then takes the lost-lock branch: the
+  fenced `FAILED` write matches nothing on the `APPLIED` document, and `migrate` throws `LockLostException` with the
+  commit's error as its cause, without reading the document. The migration is applied all the same, and the next
+  start finds it `APPLIED`. With a lease longer than that window, or with a client-side timeout, which ends the
+  retries sooner, the lock can still be held when the driver gives up, and the migration is reported as applied.
+- The `APPLIED` record of a migration with only an outside step is godwit's own write, after the step, and its failure
+  is not the step's: godwit writes no `FAILED` for it. After a driver exception it sends the same fenced record once
+  more, with majority write concern. When the first one never reached the server, the second records the migration.
+  When the first one applied and only its reply failed (a lost reply, a client-side timeout during its majority wait),
+  the second matches nothing, and the server acknowledges it only once the first is majority-committed; godwit then
+  reads the document (majority read concern, primary), and `APPLIED` with this run's owner token means the migration
+  is applied. A read alone, right after a timeout, could not see the first write while the majority lags. When the
+  second write fails too (the same outage, or a majority still behind once its own `timeoutMS` passes), the read fails,
+  or another run owns the document, the first exception propagates unchanged, with any later one attached as
+  suppressed: the next start finds the migration `APPLIED`, or resumes it
+  ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
+- If the `FAILED` write itself fails, the document stays as the step left it and the `MigrationFailedException` (or
+  the `LockLostException`) carries the write's exception as a suppressed exception. That is `RUNNING`, which the next
+  start resumes, or `APPLIED` when a commit applied although the driver threw and the majority was still behind when
+  the `FAILED` write's own `timeoutMS` passed, which the next start finds applied. Other history and lock write
+  failures propagate as the driver's exceptions ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
 - `withTransaction` is the driver's: it re-runs the body on `TransientTransactionError` and retries the commit on
   `UnknownTransactionCommitResult`, for up to 120 s. godwit wraps the body to count attempts, pause before each attempt
   after the first (driver 5.7.0 has no backoff of its own), reset counters, time each attempt (`Slow transaction` above
@@ -387,8 +421,11 @@ no index on it.
 **Read** (start of every call, again under the lock):
 
 ```javascript
-db.getCollection("godwit-history").find({}).sort({ _id: 1 }).readConcern("majority")
+db.getCollection("godwit-history").find({}).sort({ _id: 1 }).batchSize(2147483647).readConcern("majority")
 ```
+
+The largest batch size brings the whole history back in the first reply, up to the 16 MiB a reply carries. Without
+it the server's first batch stops at 101 documents, and a longer history would take a `getMore` on every start.
 
 **`RUNNING` marker, once-only migration.** A conditional upsert. If the document is `APPLIED`, the filter matches
 nothing and the upsert's insert collides with the existing `_id`: duplicate key (11000). The same error answers a
@@ -614,11 +651,12 @@ causes it recognises:
 |---|---|---|
 | Transaction past its lifetime | `NoSuchTransaction` (251) or `TransactionExceededLifetimeLimitSeconds` (290) after an attempt that ran at least 60 s | `The transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
 | Transaction too large | `TransactionTooLargeForCache` (388) | `The transaction was too large for the storage engine's cache. Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
-| DDL in a transaction | `OperationNotSupportedInTransaction` (263), or the server's refusal to build an index on an existing collection in a transaction | `DDL cannot run in a transaction: index builds on existing collections, drop, dropIndexes, renameCollection and collMod belong in outsideTransaction.` |
+| DDL in a transaction | `OperationNotSupportedInTransaction` (263), or `InvalidOptions` (72) when `createIndexes` or `create` refuses the transaction's snapshot read concern | `DDL cannot run in a transaction: index builds on existing collections, drop, dropIndexes, renameCollection and collMod belong in outsideTransaction.` |
 | Session from another client | The driver's `IllegalStateException` "ClientSession from same MongoClient" | `The step passed godwit's session to an operation on another MongoClient. Build Godwit and the services the migrations call from the same MongoClient.` |
 
-The cause itself is unchanged; the guidance only adds the line. Every page that quotes a guidance line quotes it from
-this table, and the `MigrationFailedException` KDoc holds the same lines.
+godwit also looks at the causes of the step's exception, up to eight levels deep, so a service that wraps the
+driver's error is recognised too. The cause itself is unchanged; the guidance only adds the line. Every page that
+quotes a guidance line quotes it from this table, and the `MigrationFailedException` KDoc holds the same lines.
 
 ## Read and write concerns, timeouts
 
@@ -632,7 +670,9 @@ this table, and the `MigrationFailedException` KDoc holds the same lines.
 | `hello` (topology check) | | | primary | the client's |
 
 - **Majority for bookkeeping.** A lock acquired with `w:1` could be rolled back by a failover, leaving two holders; a
-  history read below majority could see an `APPLIED` record that is later rolled back.
+  history read below majority could see an `APPLIED` record that is later rolled back. The read that settles a history
+  write whose reply failed comes after a fenced majority write that matches nothing, so it sees the write once it is
+  majority-committed, and never reports a migration applied that a failover could still undo.
 - **Snapshot transactions.** Reads inside the step see one consistent point in time, and with majority commit that
   point is majority-committed.
 - **The 5 s lock timeout.** A renewal that hangs on a stalled majority would otherwise keep the heartbeat thread blocked
@@ -788,10 +828,13 @@ what it just wrote could miss it. Read with `collection(...).withReadPreference(
 The app's client sets `timeoutMS=5000`. The driver then bounds each `withTransaction` by that timeout instead of its
 120 s retry window, and every operation in every step by 5 s. A large `inBatches` page or an index build in an outside
 step that needs longer fails with a timeout. A commit whose majority wait outlasts the timeout can apply on the server
-and still throw on the client; godwit's `FAILED` write, fenced on `RUNNING`, then matches nothing, and godwit finds the
-document `APPLIED` and reports the migration as applied ([running one migration](#running-one-migration)). Give godwit a
-client without `timeoutMS`, or one with a larger value (`Godwit(client.withTimeout(...), ...)`), keeping it the same
-client the services use.
+and still throw on the client; godwit's `FAILED` write, fenced on `RUNNING`, then matches nothing, its own majority
+wait ends once the commit is majority-committed, and godwit finds the document `APPLIED` and reports the migration as
+applied ([running one migration](#running-one-migration)). The `APPLIED` record of an outside-only migration is settled
+the same way, by sending it once more. When the majority lags by more than two timeouts, that second write times out
+too: `migrate` throws (`MigrationFailedException` with the write's timeout suppressed, or the record's own timeout), and
+the next start finds the migration `APPLIED`. Give godwit a client without `timeoutMS`, or one with a larger value
+(`Godwit(client.withTimeout(...), ...)`), keeping it the same client the services use.
 
 **A custom codec registry.**
 The shop's client registers codecs for its domain classes. godwit's own documents are unaffected (its collections use

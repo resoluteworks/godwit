@@ -95,10 +95,10 @@ What the stance means in practice:
 | Process killed mid transaction | `RUNNING`; the server aborts the open transaction within 60 s, nothing of it stays | (process gone) | As above; the transaction runs from scratch |
 | Transaction body throws | The step's writes and the `APPLIED` record roll back; `FAILED` and `lastError` written after the abort | `MigrationFailedException` | Outside step again, then the transaction |
 | Transient error (`WriteConflict`, election) | `transactionRetries` counts it once the migration applies | The driver re-runs the body, counters reset, `WARN Retrying transaction`, for up to 120 s | Nothing to retry |
-| Commit result unknown (network blip at commit) | `APPLIED` if the commit applied, else as for a body that throws | The driver retries the commit only. When it gives up although the commit applied (a client-side timeout, or the end of its 120 s window), godwit reads the document, finds it `APPLIED` by this run and reports the migration as applied | Nothing to retry, or the migration again |
+| Commit result unknown (network blip at commit) | `APPLIED` if the commit applied, else as for a body that throws | The driver retries the commit only. When it gives up although the commit applied while the lock is still held (a client-side timeout), godwit reads the document, finds it `APPLIED` by this run and reports the migration as applied. When its retries run out of the 120 s window, the lock's deadline has normally passed too: `LockLostException`, with the commit's error as its cause | Nothing to retry, or the migration again |
 | Transaction past the 60 s lifetime | `FAILED`, guidance in the message | The driver retries until its 120 s window ends, then `MigrationFailedException` | Fails the same way until the code changes |
 | Transaction too large (`TransactionTooLargeForCache`, 388) | `FAILED`, same guidance | Not retried by the driver | Same until the code changes |
-| DDL in a transaction (263) | `FAILED`, guidance | Not retried | Same until the code changes |
+| DDL in a transaction (263, or 72 for an index build) | `FAILED`, guidance | Not retried | Same until the code changes |
 | Session from another `MongoClient` | `FAILED`, guidance | `MigrationFailedException` | Same until the wiring changes |
 | `inBatches` page k fails | Pages before k and their checkpoint committed; `FAILED` | `MigrationFailedException` | Outside step again, then pages from the checkpoint |
 | Killed after the `APPLIED` commit, before the release | `APPLIED` | (process gone) | Fast path if nothing else is due; otherwise waits up to one lease for the lock |
@@ -211,7 +211,8 @@ The outside step runs again from the top. The steps already done are no-ops; `pr
 are created. `001` applies with `attempts: 2`.
 
 **What you do.** Nothing, provided the outside step is idempotent. A step that is not (a raw `createCollection`, which
-fails with `NamespaceExists` (48) when the collection exists, or a `dropIndex`) fails here on every retry. Use
+fails with `NamespaceExists` (48) when the collection exists, before MongoDB 7.0 or from 7.0 when the options differ,
+or a `dropIndex`, before MongoDB 8.3) fails here on every retry. Use
 `ensureCollection`, `dropIndexIfExists` and identical `createIndex` calls
 ([outside-transaction-steps.md](outside-transaction-steps.md)).
 
@@ -366,11 +367,11 @@ again, which runs out of time too. When the driver's 120 s window ends, godwit f
 WARN  godwit - Slow transaction id=007-customer-email-lower attempt=1 durationMs=60117
 WARN  godwit - Retrying transaction id=007-customer-email-lower attempt=2 error=NoSuchTransaction (251)
 WARN  godwit - Slow transaction id=007-customer-email-lower attempt=2 durationMs=60094
-ERROR godwit - Migration failed id=007-customer-email-lower step=IN_TRANSACTION attempts=1 error=com.mongodb.MongoCommandException: Command failed with error 251 (NoSuchTransaction)
+ERROR godwit - Migration failed id=007-customer-email-lower step=IN_TRANSACTION attempts=1 error=com.mongodb.MongoCommandException: Command execution failed on MongoDB server with error 251 (NoSuchTransaction): ...
 ```
 
 ```text
-godwit.core.MigrationFailedException: Migration 007-customer-email-lower failed in IN_TRANSACTION: Command failed with error 251 (NoSuchTransaction): 'Transaction with { txnNumber: 3 } has been aborted.'
+godwit.core.MigrationFailedException: Migration 007-customer-email-lower failed in IN_TRANSACTION: Command execution failed on MongoDB server with error 251 (NoSuchTransaction): 'Transaction with { txnNumber: 3 } has been aborted.' on server ...
 The transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.
 ```
 
@@ -440,11 +441,12 @@ val customerEmailLowerIndexInTransaction = migration("008-customer-email-lower-i
     }
 ```
 
-**What happens.** The server rejects building an index on an existing collection inside a transaction. The error is not
-transient, so there is no retry:
+**What happens.** godwit's transactions read with snapshot read concern, and the server refuses `createIndexes` in a
+transaction with that read concern, on any collection (an index build in a transaction needs read concern `local`, and
+fails on an existing collection even then). The error is not transient, so there is no retry:
 
 ```text
-godwit.core.MigrationFailedException: Migration 008-customer-email-lower-index failed in IN_TRANSACTION: Command failed with error 263 (OperationNotSupportedInTransaction): 'Cannot create new indexes on existing collection shop.customers in a multi-document transaction.'
+godwit.core.MigrationFailedException: Migration 008-customer-email-lower-index failed in IN_TRANSACTION: Command execution failed on MongoDB server with error 72 (InvalidOptions): 'Command createIndexes does not support this transaction's { readConcern: { level: "snapshot", afterClusterTime: Timestamp(1790842445, 7), provenance: "clientSupplied" } } :: caused by :: read concern not supported' on server ...
 DDL cannot run in a transaction: index builds on existing collections, drop, dropIndexes, renameCollection and collMod belong in outsideTransaction.
 ```
 
@@ -665,23 +667,32 @@ in a `GodwitException`. What is left depends on which write failed:
 - **The `RUNNING` marker.** The migration's document is unchanged (missing, `FAILED` or `RUNNING` as before) and its
   step never ran. The lock is released. The next start runs it.
 - **The `APPLIED` record of a migration with only an outside step.** `002-carts` created `carts` and its indexes, then
-  the write recording `APPLIED` failed. When it failed before reaching the server, the document stays `RUNNING`; the
-  next start logs `Resuming interrupted migration`, re-runs the outside step (all no-ops now) and records it. When the
-  write applied and only its reply was lost or timed out, godwit finds the document `APPLIED` by this run, as below.
-- **The `FAILED` record after a step failed.** Often the same outage that failed the step. The document stays
-  `RUNNING`, without this run's `lastError`. `migrate` throws `MigrationFailedException` for the step's failure, with
-  the history write's exception attached as a suppressed exception. The next start logs `Resuming interrupted
-  migration` and retries.
+  the write recording `APPLIED` failed. godwit sends the same fenced write once more, with majority write concern. When
+  the first one failed before reaching the server, the second records the migration, and the call goes on. When the
+  first one applied and only its reply was lost or timed out, the second matches nothing and is acknowledged once the
+  first is majority-committed; godwit then finds the document `APPLIED` by this run, as below. When the second write
+  fails too (the same outage, or a majority still behind after its own `timeoutMS`), `migrate` throws the first
+  write's exception, with the second's attached as suppressed. The document is then `RUNNING`, and the next start logs
+  `Resuming interrupted migration`, re-runs the outside step (all no-ops now) and records it; or it is `APPLIED`, and
+  the next start finds it applied.
+- **The `FAILED` record after a step failed.** Often the same outage that failed the step. The document stays as the
+  step left it, without this run's `lastError`: `RUNNING`, or `APPLIED` when a commit applied and the majority was
+  still behind when the `FAILED` write's own `timeoutMS` passed. `migrate` throws `MigrationFailedException` for the
+  step's failure, with the history write's exception attached as a suppressed exception. The next start logs
+  `Resuming interrupted migration` and retries, or finds the migration applied.
 - **The release.** The lease ends on its own within 60 s; the next start waits at most that long.
 
 The `APPLIED` record of a transactional step is written inside the transaction: it commits with the step's writes or
 aborts with them. The driver can still throw after a commit that applied: the app's client sets `timeoutMS` and the
 commit's majority acknowledgement takes longer, or the reply is lost and the driver's commit retries run out. godwit
 never trusts the exception alone. Its `FAILED` write matches only a document that is still `RUNNING` with this run's
-owner token; when it matches nothing, godwit reads the document on the primary. `APPLIED` with this run's token means
-the commit applied: godwit reports the migration as applied and continues, so the next start does not run its
-transactional step a second time. Anything else means another run owns the document: godwit writes nothing more and
-throws `LockLostException`, with the step's error as its cause.
+owner token; when it matches nothing, the server acknowledges it, with majority write concern, once the commit is
+majority-committed, and godwit then reads the document on the primary. `APPLIED` with this run's token means the commit
+applied: godwit reports the migration as applied and continues, so the next start does not run its transactional step
+a second time. Anything else means another run owns the document: godwit writes nothing more and throws
+`LockLostException`, with the step's error as its cause. When the lock is already lost as the driver gives up, which
+is how commit retries that run for 120 s normally end, godwit throws `LockLostException` with the commit's error as its
+cause without reading the document; the next start finds the migration `APPLIED`.
 
 **What you do.** Fix the connectivity or the permissions (a database user without write access to `godwit-history`
 fails with `Unauthorized`, 13). godwit retries everything on the next start.
@@ -854,7 +865,7 @@ During an incident on 2026-10-05, an operator built `008`'s index on `customers.
 which creates the same index under the default name. On production it fails:
 
 ```text
-godwit.core.MigrationFailedException: Migration 008-customer-email-lower-index failed in OUTSIDE_TRANSACTION: Command failed with error 85 (IndexOptionsConflict): 'Index already exists with a different name: emailLower_unique'
+godwit.core.MigrationFailedException: Migration 008-customer-email-lower-index failed in OUTSIDE_TRANSACTION: Command execution failed on MongoDB server with error 85 (IndexOptionsConflict): 'Index already exists with a different name: emailLower_unique' on server ...
 ```
 
 The hand-built index is the one `008` would build. Record that, with the reason:

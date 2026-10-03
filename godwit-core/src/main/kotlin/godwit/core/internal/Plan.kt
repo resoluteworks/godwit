@@ -24,9 +24,14 @@ internal data class Plan(
     /** History is empty and adoption cannot run: the untracked-database guard decides under the lock. */
     val untracked: Boolean
 ) {
+    /** The due migrations that have a step that runs in a transaction, in run order. */
+    val transactional: List<Migration>
+        get() = due.map { it.migration }.filter { migration ->
+            migration.steps.any { it != StepKind.OUTSIDE_TRANSACTION }
+        }
+
     /** A due migration has a step that runs in a transaction, so the server must support transactions. */
-    val needsTransactions: Boolean
-        get() = due.any { due -> due.migration.steps.any { it != StepKind.OUTSIDE_TRANSACTION } }
+    val needsTransactions: Boolean get() = transactional.isNotEmpty()
 
     /** Nothing to run or record: the call returns without the lock. */
     val nothingDue: Boolean get() = due.isEmpty() && superseded.isEmpty()

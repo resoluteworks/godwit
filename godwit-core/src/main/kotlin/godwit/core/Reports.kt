@@ -125,7 +125,7 @@ class MigrationStatus internal constructor(
  */
 class HistoryEntry internal constructor(
     val id: String,
-    /** For a repeatable, carries the stored revision. */
+    /** For a repeatable, carries the stored revision: empty until a run of the repeatable applies. */
     val kind: MigrationKind,
     val state: HistoryState,
     val origin: Origin,

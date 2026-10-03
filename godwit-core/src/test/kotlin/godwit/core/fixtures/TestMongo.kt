@@ -9,6 +9,8 @@ import org.bson.Document
 import org.slf4j.LoggerFactory
 import org.testcontainers.mongodb.MongoDBContainer
 import java.util.UUID
+import java.util.concurrent.TimeUnit
+import kotlin.time.Duration
 
 private const val REPLICA_SET_NAME = "docker-rs"
 
@@ -51,13 +53,21 @@ object TestMongo {
      * A new client named [appName], so that a fail point can target its commands alone, with [listeners] observing
      * them. The caller closes it.
      */
-    fun client(appName: String, vararg listeners: CommandListener): MongoClient = MongoClient.create(
-        MongoClientSettings.builder()
-            .applyConnectionString(ConnectionString(connectionString))
-            .applicationName(appName)
-            .apply { listeners.forEach { addCommandListener(it) } }
-            .build()
-    )
+    fun client(appName: String, vararg listeners: CommandListener): MongoClient = client(appName, null, *listeners)
+
+    /**
+     * [client] with a client-side operation timeout (`timeoutMS`), which bounds every operation of the client and each
+     * `withTransaction` as a whole, when [timeout] is not null.
+     */
+    fun client(appName: String, timeout: Duration?, vararg listeners: CommandListener): MongoClient =
+        MongoClient.create(
+            MongoClientSettings.builder()
+                .applyConnectionString(ConnectionString(connectionString))
+                .applicationName(appName)
+                .apply { timeout?.let { timeout(it.inWholeMilliseconds, TimeUnit.MILLISECONDS) } }
+                .apply { listeners.forEach { addCommandListener(it) } }
+                .build()
+        )
 
     /** A new client and a new, empty database. The caller closes the result. */
     fun database(): TestDatabase = TestDatabase(client(), UUID.randomUUID().toString())
@@ -65,7 +75,11 @@ object TestMongo {
     /**
      * Turns on the server's `failCommand` fail point for the [commands] of the clients named [appName], in [mode]
      * (`"alwaysOn"`, `Document("times", n)` or `Document("skip", n)`), with the rest of its [data] (`errorCode`,
-     * `blockConnection`, `blockTimeMS`). Closing the result turns it off.
+     * `blockConnection`, `blockTimeMS`, `namespace`). Closing the result turns it off.
+     *
+     * A fail point on `find` without a `namespace` also fails the first retryable write of a session the server has
+     * not seen: the server reads that session's state from `config.transactions` with a `find` of its own, under the
+     * client's name. A `namespace` (`"<database>.<collection>"`) keeps it to the reads meant.
      */
     fun failCommand(appName: String, commands: List<String>, mode: Any, data: Document): AutoCloseable {
         configureFailCommand(
@@ -77,10 +91,21 @@ object TestMongo {
         return AutoCloseable { configureFailCommand("off", Document()) }
     }
 
-    private fun configureFailCommand(mode: Any, data: Document) {
+    private fun configureFailCommand(mode: Any, data: Document) = configureFailPoint("failCommand", mode, data)
+
+    /**
+     * Turns on the server's fail point [name] in [mode] with [data], such as `hangBeforeWaitingForWriteConcern`, which
+     * holds every write's reply before its write concern wait. Closing the result turns it off.
+     */
+    fun failPoint(name: String, mode: Any, data: Document = Document()): AutoCloseable {
+        configureFailPoint(name, mode, data)
+        return AutoCloseable { configureFailPoint(name, "off", Document()) }
+    }
+
+    private fun configureFailPoint(name: String, mode: Any, data: Document) {
         client().use { admin ->
             admin.getDatabase("admin").runCommand(
-                Document("configureFailPoint", "failCommand").append("mode", mode).append("data", data)
+                Document("configureFailPoint", name).append("mode", mode).append("data", data)
             )
         }
     }

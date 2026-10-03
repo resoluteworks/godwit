@@ -7,6 +7,7 @@ import godwit.core.internal.InBatchesStep
 import godwit.core.internal.InTransactionStep
 import godwit.core.internal.OutsideFirst
 import godwit.core.internal.StepBodies
+import godwit.core.internal.StepContext
 import godwit.core.internal.TransactionalOnly
 import godwit.core.internal.TransactionalStep
 import io.kotest.assertions.withClue
@@ -18,8 +19,8 @@ import io.mockk.mockk
 import org.bson.Document
 
 private val database = mockk<MongoDatabase>()
-private val outsideScope = OutsideTransactionScope("id", database)
-private val transactionScope = TransactionScope("id", database, mockk<ClientSession>(), 1)
+private val outsideScope = OutsideTransactionScope("id", database, StepContext {})
+private val transactionScope = TransactionScope("id", database, mockk<ClientSession>(), 1, StepContext {})
 
 /** What running a migration's step bodies did: each step body appends what it saw. */
 private class Trace {

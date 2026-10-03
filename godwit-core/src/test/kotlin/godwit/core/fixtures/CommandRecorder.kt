@@ -30,12 +30,14 @@ class RecordedCommand(val name: String, val command: BsonDocument) {
 }
 
 /**
- * Records the commands of the client it is installed on. [onFailed] and [onSucceeded] run on the thread that sent the
- * command, after its reply, so a test can act at an exact point of an operation.
+ * Records the commands of the client it is installed on. [onStarted] runs on the thread that sends the command, before
+ * it is sent; [onFailed] and [onSucceeded] run on that thread after its reply, so a test can act at an exact point of
+ * an operation.
  */
 class CommandRecorder(
     private val onSucceeded: (RecordedCommand) -> Unit = {},
-    private val onFailed: (RecordedCommand) -> Unit = {}
+    private val onFailed: (RecordedCommand) -> Unit = {},
+    private val onStarted: (RecordedCommand) -> Unit = {}
 ) : CommandListener {
     private val byRequest = ConcurrentHashMap<Int, RecordedCommand>()
     private val all = CopyOnWriteArrayList<RecordedCommand>()
@@ -53,6 +55,7 @@ class CommandRecorder(
         val recorded = RecordedCommand(event.commandName, copy)
         byRequest[event.requestId] = recorded
         all += recorded
+        onStarted(recorded)
     }
 
     override fun commandSucceeded(event: CommandSucceededEvent) {

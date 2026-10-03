@@ -1,6 +1,8 @@
 package godwit.core
 
 import com.mongodb.kotlin.client.MongoCluster
+import godwit.core.internal.Runner
+import godwit.core.internal.Tuning
 import godwit.core.internal.validateCall
 
 /**
@@ -39,8 +41,9 @@ import godwit.core.internal.validateCall
  * | WARN  | Marked migration applied        | id, reason, holder                                                     |
  *
  * On "Retrying transaction", `error` is what made the driver run the body again: the code name and code of the error
- * the previous attempt's body threw, such as `WriteConflict (112)`, or `commit` when the body returned and the commit
- * failed with a transient error. Every retry counts in `transactionRetries`; the line is rate-limited.
+ * the previous attempt's body threw, such as `WriteConflict (112)`, or for an error without a code name (a network
+ * error) its exception class and code, such as `MongoSocketReadException (-2)`, or `commit` when the body returned and
+ * the commit failed with a transient error. Every retry counts in `transactionRetries`; the line is rate-limited.
  *
  * On "Migration failed", `error` is the class and message of the exception the step threw. On "Lock renewal failed"
  * and "Lock release failed", it is the class and message of the exception the lock operation threw. On "Lost migration
@@ -49,12 +52,19 @@ import godwit.core.internal.validateCall
  * last successful one, or of the acquire before the first); the heartbeat thread or [StepScope.checkLock], whichever
  * notices first, logs it.
  */
-class Godwit(
+class Godwit internal constructor(
     /** The cluster that owns [databaseName]. godwit opens its sessions on it. */
     val cluster: MongoCluster,
     val databaseName: String,
-    val config: GodwitConfig = GodwitConfig()
+    val config: GodwitConfig,
+    private val tuning: Tuning
 ) {
+    constructor(cluster: MongoCluster, databaseName: String, config: GodwitConfig = GodwitConfig()) :
+        this(cluster, databaseName, config, Tuning())
+
+    /** A runner per call: a `Godwit` holds only its constructor arguments. */
+    private val runner: Runner get() = Runner(cluster, databaseName, config, tuning)
+
     /**
      * Brings the database up to [target] and returns what happened. Synchronous; safe to call from several processes
      * at once (the lock serialises them).
@@ -80,12 +90,14 @@ class Godwit(
      * A migration is due when its history document is missing or not APPLIED; a repeatable also when its stored
      * revision differs; an every-start one always. Stops at the first failure with [MigrationFailedException]: the
      * migration is recorded FAILED with its error, and the next call retries it, outside step first. When the driver
-     * throws after a commit that did apply (the reply was lost or timed out), godwit finds the document APPLIED by this
-     * run, reports the migration as applied and continues.
+     * throws after a commit that did apply (the reply was lost or timed out) while this run still holds the lock,
+     * godwit's fenced FAILED write matches nothing; once the server acknowledges it with majority write concern, godwit
+     * finds the document APPLIED by this run, reports the migration as applied and continues. A migration with only an
+     * outside step does the same with its APPLIED record, which godwit sends once more after a driver exception.
      */
     fun migrate(migrations: List<Migration>, target: Target = Target.Latest): MigrationReport {
         validateCall(migrations, target)
-        throw NotImplementedError("P3")
+        return runner.migrate(migrations, target)
     }
 
     /** [migrate] for migrations written inline. */
@@ -102,20 +114,20 @@ class Godwit(
      */
     fun status(migrations: List<Migration>): MigrationStatus {
         validateMigrations(migrations)
-        throw NotImplementedError("P3")
+        return runner.status(migrations)
     }
 
     /**
      * For a process that must not migrate (a worker deployed next to the app): throws [PendingMigrationsException]
      * unless [status] is up to date.
      */
-    fun requireUpToDate(migrations: List<Migration>): Unit = run {
-        validateMigrations(migrations)
-        throw NotImplementedError("P3")
+    fun requireUpToDate(migrations: List<Migration>) {
+        val status = status(migrations)
+        if (!status.isUpToDate) throw PendingMigrationsException(status.pending, status.problems)
     }
 
-    /** Every history document, sorted by id. */
-    fun history(): List<HistoryEntry> = throw NotImplementedError("P3")
+    /** Every history document, sorted by id. Reads without the lock. */
+    fun history(): List<HistoryEntry> = runner.history()
 
     /**
      * Records the once-only migration [id] as APPLIED with origin [Origin.MARKED] and [reason], without running

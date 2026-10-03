@@ -84,7 +84,7 @@ This does not compile:
 | `createIndex`, same name, different keys | `IndexKeySpecsConflict` (86) | Fails: real drift | A new name, or drop and recreate in a new migration |
 | `createCollection` | `NamespaceExists` (48) before MongoDB 7.0; from 7.0 only when the options differ | No | `ensureCollection` |
 | `dropIndex` of an index that is gone | `IndexNotFound` (27) before MongoDB 8.3; from 8.3 it succeeds | No, before 8.3 | `dropIndexIfExists` |
-| `createSearchIndex` with a name that exists | Fails | No | `ensureSearchIndex` |
+| `createSearchIndex` with a name that exists | `IndexAlreadyExists` (68) when the definition differs; the Atlas local image accepts the same definition again | No | `ensureSearchIndex` |
 | `updateSearchIndex` with the same definition | Sets it again | Yes | The driver call |
 | `drop()` of a collection that is gone | The driver ignores `NamespaceNotFound` (26) | Yes | The driver call |
 | `collMod` (TTL, validator, validation level) | Sets the same value | Yes | `database.runCommand(...)` |
@@ -97,14 +97,14 @@ identical `createIndex` that either returns at once or waits for the build alrea
 
 ## The three DDL helpers
 
-godwit adds a helper for each common DDL call whose raw form fails when it runs a second time. Inside a step they are
+godwit adds a helper for each common DDL call whose raw form can fail when it runs a second time. Inside a step they are
 members of `OutsideTransactionScope`; everywhere else they are public extensions in `godwit.core`.
 
 | Member (inside an outside step) | Extension (anywhere) | Returns | Behaviour |
 |---|---|---|---|
-| `ensureCollection(name, options)` | `MongoDatabase.ensureCollection(name, options)` | `true` when this call created it | Creates the collection unless one with that name exists. The options of an existing collection are neither compared nor changed. A concurrent create (`NamespaceExists`, 48) counts as existing. |
-| `ensureSearchIndex(collection, name, definition, awaitReady)` | `MongoCollection<*>.ensureSearchIndex(name, definition, awaitReady)` | `true` when this call created it | Creates the Atlas Search index unless a search index with that name exists. The definition of an existing one is neither compared nor changed. A concurrent create of the same name counts as existing. With `awaitReady` null it returns once the index is requested; otherwise it polls until the index is queryable and throws `SearchIndexNotReadyException` when `awaitReady` passes first. The member calls `checkLock()` between polls. |
-| `dropIndexIfExists(collection, indexName)` | `MongoCollection<*>.dropIndexIfExists(indexName)` | `true` when this call dropped it | Drops the index when `listIndexes` shows it; returns `false` when it does not exist, on every server version (from 8.3 `dropIndexes` itself succeeds for a missing index, so its result cannot tell). A concurrent drop (`IndexNotFound`, 27) counts as gone. |
+| `ensureCollection(name, options)` | `MongoDatabase.ensureCollection(name, options)` | `true` when this call created it | Creates the collection unless one with that name exists. The options of an existing collection are neither compared nor changed. A concurrent create that the server refuses (`NamespaceExists`, 48: before MongoDB 7.0, or from 7.0 when the options differ) counts as existing; from 7.0 the server accepts a create with the same options, so two concurrent calls can both return `true`. |
+| `ensureSearchIndex(collection, name, definition, awaitReady)` | `MongoCollection<*>.ensureSearchIndex(name, definition, awaitReady)` | `true` when this call created it | Creates the Atlas Search index unless a search index with that name exists. The definition of an existing one is neither compared nor changed. A concurrent create of the same name counts as existing (`IndexAlreadyExists`, 68, when its definition differs). With `awaitReady` null it returns once the index is requested; otherwise it polls until the index is queryable and throws `SearchIndexNotReadyException` when `awaitReady` passes first. The member calls `checkLock()` between polls. |
+| `dropIndexIfExists(collection, indexName)` | `MongoCollection<*>.dropIndexIfExists(indexName)` | `true` when this call dropped it | Drops the index when `listIndexes` shows it; returns `false` when it does not exist, on every server version (from 8.3 `dropIndexes` itself succeeds for a missing index, so its result cannot tell). A concurrent drop that the server refuses (`IndexNotFound`, 27: before MongoDB 8.3) counts as gone; from 8.3 the server accepts the drop of a missing index, so two concurrent calls can both return `true`. |
 
 This step (a fragment of a migration) is wrong, because each line fails when a retry runs it again:
 
@@ -572,7 +572,7 @@ You: nothing for these three; the shop's later migrations need a replica set.
 
 Chosen: `ensureCollection`, `ensureSearchIndex` and `dropIndexIfExists`, and nothing else.
 
-These are the three common DDL calls whose raw form fails when it runs a second time. Everything else in the table
+These are the three common DDL calls whose raw form can fail when it runs a second time. Everything else in the table
 above is already safe to repeat (`createIndex`, `collMod`, `drop`, `updateSearchIndex`) or must not be made safe
 blindly (`renameCollection`).
 

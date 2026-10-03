@@ -56,7 +56,7 @@ Every call in it is safe to repeat:
 
 | Call | On a database that already has it |
 |---|---|
-| `MongoDatabase.ensureCollection(name)`, from godwit-core | returns false; the raw `createCollection` would throw `NamespaceExists` (48) |
+| `MongoDatabase.ensureCollection(name)`, from godwit-core | returns false; the raw `createCollection` would throw `NamespaceExists` (48) before MongoDB 7.0, or from 7.0 when the options differ |
 | `createIndexes` with identical specifications | does nothing |
 
 `ensureCollection`, `MongoCollection.ensureSearchIndex` and `MongoCollection.dropIndexIfExists` are public extensions in

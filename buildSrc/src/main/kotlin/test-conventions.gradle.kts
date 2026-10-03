@@ -25,6 +25,7 @@ tasks.withType<Test>().configureEach {
     }
     // The test fixtures read the container images from these properties; they have no copy of the versions.
     systemProperty("godwit.mongoImage", providers.gradleProperty("mongoImage").get())
+    systemProperty("godwit.mongoNewerImage", providers.gradleProperty("mongoNewerImage").get())
     systemProperty("godwit.atlasLocalImage", providers.gradleProperty("atlasLocalImage").get())
     // The version the build writes into godwit-core, which history documents carry as godwitVersion.
     systemProperty("godwit.version", providers.gradleProperty("godwitVersion").get())

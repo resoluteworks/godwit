@@ -51,8 +51,12 @@ internal data class FailedRun(val error: Throwable, val step: StepKind?, val dur
 internal class HistoryStore(private val bookkeeping: Bookkeeping) {
     private val collection = bookkeeping.history
 
-    /** Every document, sorted by `_id`: one `find`. */
-    fun readAll(): List<Document> = collection.find().sort(Sorts.ascending("_id")).toList()
+    /**
+     * Every document, sorted by `_id`: one `find`. Without a batch size the server's first batch stops at 101
+     * documents, and a longer history would take a `getMore` as well; with the largest one, the first batch holds
+     * every document up to the 16 MiB a reply can carry.
+     */
+    fun readAll(): List<Document> = collection.find().sort(Sorts.ascending("_id")).batchSize(Int.MAX_VALUE).toList()
 
     /** The document of [id], or null. */
     fun read(id: String): Document? = collection.find(Document("_id", id)).firstOrNull()

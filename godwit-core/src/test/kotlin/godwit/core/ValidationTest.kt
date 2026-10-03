@@ -6,6 +6,7 @@ import io.kotest.assertions.throwables.shouldNotThrowAny
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.MockKException
 import io.mockk.mockk
 
 private const val ID_RULE = "ids match [A-Za-z0-9][A-Za-z0-9._-]{0,127}"
@@ -262,15 +263,15 @@ class ValidationTest : StringSpec() {
             )
         }
 
-        "a valid list and target pass validation; the run itself is phase P3" {
+        "a valid list and target pass validation and reach the database, which this cluster refuses to open" {
             for (target in listOf(
                 Target.Latest,
                 Target.Before("004-order-status"),
                 Target.Through("006-order-totals")
             )) {
-                shouldThrow<NotImplementedError> { godwit.migrate(shopList, target) }.message shouldBe "P3"
+                shouldThrow<MockKException> { godwit.migrate(shopList, target) }
             }
-            shouldThrow<NotImplementedError> { godwit.migrate(initialSetup, carts) }.message shouldBe "P3"
+            shouldThrow<MockKException> { godwit.migrate(initialSetup, carts) }
             shouldThrow<InvalidMigrationsException> {
                 godwit.migrate(referenceCountries, referenceCountries)
             }.problems shouldBe
@@ -284,8 +285,8 @@ class ValidationTest : StringSpec() {
             shouldThrow<InvalidMigrationsException> { godwit.status(invalid) }.problems shouldBe expected
             shouldThrow<InvalidMigrationsException> { godwit.requireUpToDate(invalid) }.problems shouldBe expected
 
-            shouldThrow<NotImplementedError> { godwit.status(shopList) }.message shouldBe "P3"
-            shouldThrow<NotImplementedError> { godwit.requireUpToDate(shopList) }.message shouldBe "P3"
+            shouldThrow<MockKException> { godwit.status(shopList) }
+            shouldThrow<MockKException> { godwit.requireUpToDate(shopList) }
         }
     }
 }

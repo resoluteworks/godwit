@@ -513,10 +513,10 @@ fun awaitUpToDate(godwit: Godwit, migrations: List<Migration>, timeout: Duration
 ## `history()`
 
 `history()` returns every history document as a `HistoryEntry`, sorted by id. Its properties mirror the fields above:
-`id`, `kind` (a `MigrationKind`, carrying the stored revision for a repeatable), `state`, `origin`, `description`,
-`steps`, `attempts`, `transactionRetries`, `counts`, `duration`, `startedAt`, `finishedAt`, `lastError` (`type`,
-`message`, `stack`, `step`, `at`), `checkpoint` (`lastId`, `batches`), `runCount`, `lastRunAt`, `supersedes`,
-`outOfOrder`, `reason`, `holder`, `runId` and `godwitVersion`. It reads without the lock.
+`id`, `kind` (a `MigrationKind`, carrying the stored revision for a repeatable, empty until a run of it applies),
+`state`, `origin`, `description`, `steps`, `attempts`, `transactionRetries`, `counts`, `duration`, `startedAt`,
+`finishedAt`, `lastError` (`type`, `message`, `stack`, `step`, `at`), `checkpoint` (`lastId`, `batches`), `runCount`,
+`lastRunAt`, `supersedes`, `outOfOrder`, `reason`, `holder`, `runId` and `godwitVersion`. It reads without the lock.
 
 An admin command that prints it:
 
@@ -639,7 +639,7 @@ Every log line in these docs prints its values the same way:
 | `error` on `Migration failed` | the class and message of the exception the step threw | `error=java.net.http.HttpTimeoutException: request timed out` |
 | `error` on `Lock renewal failed` and `Lock release failed` | the class and message of the exception the lock operation threw | `error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
 | `reason` on `Lost migration lock` | `NOT_OWNER` when a renewal matched no lock document with this run's owner token (another run holds the lock, or the document was deleted); `DEADLINE_PASSED` when no renewal succeeded within `lease - safetyMargin` of the last one, or of the acquire before the first | `reason=DEADLINE_PASSED` |
-| `error` on `Retrying transaction` | the code name and code of the error the previous attempt's body threw, or `commit` when the body returned and the commit failed with a transient error | `error=WriteConflict (112)`, `error=commit` |
+| `error` on `Retrying transaction` | the code name and code of the error the previous attempt's body threw, or for an error without a code name (a network error) its exception class and code, or `commit` when the body returned and the commit failed with a transient error | `error=WriteConflict (112)`, `error=MongoSocketReadException (-2)`, `error=commit` |
 
 | Level | Message | Keys | Example |
 |---|---|---|---|

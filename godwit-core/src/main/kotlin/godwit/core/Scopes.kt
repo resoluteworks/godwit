@@ -4,6 +4,9 @@ import com.mongodb.client.model.CreateCollectionOptions
 import com.mongodb.kotlin.client.ClientSession
 import com.mongodb.kotlin.client.MongoCollection
 import com.mongodb.kotlin.client.MongoDatabase
+import godwit.core.internal.SEARCH_INDEX_POLL
+import godwit.core.internal.StepContext
+import godwit.core.internal.ensureSearchIndex
 import org.bson.Document
 import org.bson.conversions.Bson
 import kotlin.time.Duration
@@ -50,22 +53,26 @@ sealed class StepScope {
  * The DDL helpers are members of this scope only. `ensureCollection(...)` does not resolve inside `inTransaction` or
  * `inBatches`, where DDL fails at runtime.
  */
-class OutsideTransactionScope internal constructor(override val id: String, override val database: MongoDatabase) :
-    StepScope() {
-    override fun count(name: String, n: Long): Unit = throw NotImplementedError("P3")
+class OutsideTransactionScope internal constructor(
+    override val id: String,
+    override val database: MongoDatabase,
+    private val context: StepContext
+) : StepScope() {
+    override fun count(name: String, n: Long): Unit = context.count(name, n)
 
-    override fun checkLock(): Unit = throw NotImplementedError("P3")
+    override fun checkLock(): Unit = context.checkLock()
 
     /** [MongoDatabase.ensureCollection] on [database]. */
     fun ensureCollection(name: String, options: CreateCollectionOptions = CreateCollectionOptions()): Boolean =
-        throw NotImplementedError("P3")
+        database.ensureCollection(name, options)
 
     /** [MongoCollection.ensureSearchIndex] on [collection], calling [checkLock] between polls while it waits. */
     fun ensureSearchIndex(collection: String, name: String, definition: Bson, awaitReady: Duration? = null): Boolean =
-        throw NotImplementedError("P3")
+        ensureSearchIndex(collection(collection), name, definition, awaitReady, SEARCH_INDEX_POLL, ::checkLock)
 
     /** [MongoCollection.dropIndexIfExists] on [collection]. */
-    fun dropIndexIfExists(collection: String, indexName: String): Boolean = throw NotImplementedError("P3")
+    fun dropIndexIfExists(collection: String, indexName: String): Boolean =
+        collection(collection).dropIndexIfExists(indexName)
 }
 
 /**
@@ -89,9 +96,10 @@ class TransactionScope internal constructor(
     /** The session that carries the transaction. */
     val session: ClientSession,
     /** 1 on the first run of the body, plus one per driver retry after a transient error. Per page in `inBatches`. */
-    val attempt: Int
+    val attempt: Int,
+    private val context: StepContext
 ) : StepScope() {
-    override fun count(name: String, n: Long): Unit = throw NotImplementedError("P3")
+    override fun count(name: String, n: Long): Unit = context.count(name, n)
 
-    override fun checkLock(): Unit = throw NotImplementedError("P3")
+    override fun checkLock(): Unit = context.checkLock()
 }

@@ -2,11 +2,17 @@ package godwit.core.internal
 
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.spi.ILoggingEvent
+import godwit.core.GodwitConfig
+import godwit.core.MigrationFailedException
+import godwit.core.OutOfOrder
 import godwit.core.StepKind
+import godwit.core.fixtures.GodwitFixture
 import godwit.core.fixtures.LogCapture
 import godwit.core.fixtures.TestMongo
 import godwit.core.fixtures.keyValues
 import godwit.core.fixtures.line
+import godwit.core.migration
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldHaveSize
@@ -203,6 +209,67 @@ class LogCatalogueTest : StringSpec() {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        "every event the runner emits for once-only migrations has its catalogue level and keys" {
+            val catalogue = kdocCatalogue().associateBy { it.message }
+            val config = GodwitConfig(outOfOrder = OutOfOrder.RUN, slowTransactionWarning = 1.milliseconds)
+            GodwitFixture(appName = "catalogue-runner", config = config).use { f ->
+                fun planted(id: String, state: String) = Document("_id", id).append("kind", "ONCE")
+                    .append("steps", listOf("OUTSIDE_TRANSACTION")).append("state", state).append("origin", "RAN")
+                    .append("attempts", 1).append("owner", "an-earlier-run")
+                f.history.insertMany(
+                    listOf(
+                        planted("001-resumed", "RUNNING"),
+                        planted("003-applied", "APPLIED"),
+                        planted("099-x", "APPLIED")
+                    )
+                )
+                val migrations = listOf(
+                    migration("001-resumed").outsideTransaction { count("made", 1) },
+                    migration("002-out-of-order").inTransaction {
+                        Thread.sleep(5)
+                        collection("orders").insertOne(session, Document("status", "PAID"))
+                        count("ordersPaid", 1)
+                    },
+                    migration("003-applied").outsideTransaction { }
+                )
+                val failing = migration("004-failing").outsideTransaction { error("boom") }
+                val transient = Document("errorCode", 112).append("errorLabels", listOf("TransientTransactionError"))
+
+                LogCapture().use { logs ->
+                    TestMongo.failCommand(f.appName, listOf("insert"), Document("times", 1), transient).use {
+                        f.godwit.migrate(migrations)
+                    }
+                    f.godwit.migrate(migrations)
+                    shouldThrow<MigrationFailedException> { f.godwit.migrate(migrations + failing) }
+
+                    logs.events.map { it.message }.toSet() shouldBe setOf(
+                        "Unknown applied migrations",
+                        "Acquired migration lock",
+                        "Resuming interrupted migration",
+                        "Running migration",
+                        "Applied migration",
+                        "Running out-of-order migration",
+                        "Retrying transaction",
+                        "Slow transaction",
+                        "Migrations complete",
+                        "Migrations up to date",
+                        "Migration failed"
+                    )
+                    logs.events.forEach { event ->
+                        withClue(event.line) {
+                            val row = catalogue.getValue(event.message)
+                            event.level.toString() shouldBe row.level
+                            val keys = event.keyValues.keys.toList()
+                            keys.take(row.keys.size) shouldBe row.keys
+                            if (!row.counters) keys shouldBe row.keys
+                        }
+                    }
+                    logs.events("Applied migration").map { it.keyValues.keys.drop(7) } shouldBe
+                        listOf(listOf("made"), listOf("ordersPaid"))
                 }
             }
         }

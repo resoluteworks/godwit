@@ -240,7 +240,8 @@ On every new run of the body, godwit:
 - resets the step's counters, so `count(...)` reports the work that committed and nothing from aborted attempts;
 - adds one to `transactionRetries`, which history and `MigrationOutcome` report, and logs a WARN for the first retry
   of the transaction and then at most every 10 s. Its `error` is the code name and code of the error the previous
-  run's body threw, or `commit` when the body returned and the commit failed with a transient error.
+  run's body threw (for an error without a code name, such as a network error, its exception class and code:
+  `MongoSocketReadException (-2)`), or `commit` when the body returned and the commit failed with a transient error.
 
 ```text
 INFO  godwit - Running migration id=004-order-status kind=ONCE steps=[IN_TRANSACTION] attempt=1
@@ -391,10 +392,12 @@ builds the index of `006-order-totals` in the transaction:
 }
 ```
 
-The server rejects it (`OperationNotSupportedInTransaction`, 263, or an error that an index cannot be created on an
-existing collection in a transaction). godwit records the migration FAILED and throws `MigrationFailedException`, whose
-message says to move the call to `outsideTransaction`. Without `session` the call escapes instead: the index is built
-outside the transaction, is not rolled back, and can wait behind the transaction's own locks.
+The server rejects it: `createIndexes` refuses a transaction whose read concern is snapshot, as godwit's are
+(`InvalidOptions`, 72), and `drop`, `dropIndexes`, `renameCollection` and `collMod` refuse any transaction
+(`OperationNotSupportedInTransaction`, 263). godwit records the migration FAILED and throws
+`MigrationFailedException`, whose message says to move the call to `outsideTransaction`. Without `session` the call
+escapes instead: the index is built outside the transaction, is not rolled back, and can wait behind the transaction's
+own locks.
 
 Implicit collection creation is allowed: an insert or upsert into a collection that does not exist creates it inside
 the transaction, under any read concern. `reference-countries` creates `countries` that way on a fresh database. When a
@@ -528,9 +531,11 @@ each transaction touches fewer documents.
 
 godwit: the driver gets `UnknownTransactionCommitResult` and retries only the commit; the server recognises a commit
 that already happened. The body does not run again and `attempt` does not change. If the driver gives up although the
-commit applied (the app's client sets `timeoutMS`, or the 120 s window ends), godwit's `FAILED` write, which matches
-only a `RUNNING` document with this run's owner token, matches nothing; godwit reads the document, finds it `APPLIED`
-by this run and reports the migration as applied.
+commit applied (the app's client sets `timeoutMS`), godwit's `FAILED` write, which matches only a `RUNNING` document
+with this run's owner token, matches nothing; once the server acknowledges it with majority write concern, godwit reads
+the document, finds it `APPLIED` by this run and reports the migration as applied. When the commit retries run out of
+the 120 s window instead, the lock's deadline has normally passed with them: `migrate` throws `LockLostException` with
+the commit's error as its cause, and the next start finds the migration `APPLIED`.
 
 You: nothing.
 

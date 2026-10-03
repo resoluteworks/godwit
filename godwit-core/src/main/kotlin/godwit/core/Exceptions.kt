@@ -40,9 +40,13 @@ class UntrackedDatabaseException internal constructor(val collections: List<Stri
 
 /**
  * Migration [id] failed in [step]. It is recorded FAILED with the error; the next [Godwit.migrate] retries it, outside
- * step first. [report] covers what this call did before the failure.
+ * step first. [report] covers what this call did before the failure. When the FAILED write fails too, this exception
+ * carries that write's exception as suppressed and the document stays as the step left it: RUNNING, which the next
+ * start resumes, or APPLIED when a commit applied although the driver threw and the majority was still behind when
+ * the FAILED write gave up, which the next start finds applied.
  *
- * The message adds one line of guidance for the causes godwit recognises:
+ * The message adds one line of guidance for the causes godwit recognises, in the step's exception or in its causes up
+ * to eight levels deep, so a service that wraps the driver's error is recognised too:
  *
  * | Cause | Guidance line |
  * |---|---|
@@ -72,7 +76,10 @@ class LockTimeoutException internal constructor(val holder: LockHolder?, val wai
 
 /**
  * This run lost the migration lock (a renewal found another owner, or the lease deadline passed without one) while
- * running [id]. Its uncommitted transaction rolled back; the process now holding the lock continues the work.
+ * running [id]. Its uncommitted transaction rolled back; the process now holding the lock continues the work. A commit
+ * that applied although the driver threw, once the lock was lost too (commit retries that ran for the driver's 120 s
+ * outlast the default lease), stays applied, with the commit's error as the [cause]: the next start finds the
+ * migration APPLIED.
  *
  * When a step failed and the lock was lost at the same moment, the step's exception is the [cause], and godwit records
  * it as the migration's `lastError` with the FAILED write, which is fenced on this run's owner token and on RUNNING:

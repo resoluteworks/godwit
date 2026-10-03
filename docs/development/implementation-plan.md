@@ -136,6 +136,8 @@ logbackVersion = 1.5.32
 
 mongoImage = mongo:8.0.17
 
+mongoNewerImage = mongo:8.3
+
 atlasLocalImage = mongodb/mongodb-atlas-local:8.0
 ```
 
@@ -391,21 +393,30 @@ runId=... lockWaitMs=<n>`; `Lost migration lock runId=... holder=... reason=DEAD
 `inTransaction` steps, with the exactly-once and at-least-once guarantees holding through every crash window.
 
 **Files.** `godwit-core/src/main/kotlin/godwit/core/internal/Runner.kt`, `Transactions.kt` (the wrapper around the
-driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (scope implementations); the bodies of
+driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (scope implementations), `SearchIndexes.kt`
+(the search index helper and its polling), `HistoryEntries.kt` (history documents as `HistoryEntry`); the bodies of
 `Godwit.migrate`, `status`, `requireUpToDate`, `history`; `Ddl.kt` bodies. Tests add
-`godwit-core/src/test/kotlin/godwit/core/crash/CrashMain.kt` and `CrashHarness.kt`.
+`godwit-core/src/test/kotlin/godwit/core/crash/CrashMain.kt` and `CrashHarness.kt`, the `mongoNewerImage` property
+(a MongoDB 8.3 image for `DdlHelpersTest`), and `TwoMemberReplicaSet` (a primary and a priority-0 secondary in one
+container, whose replication a test stops to hold the majority back, for `MajorityLagTest`).
 
 **Behaviours.**
 
 - The `migrate` sequence of [architecture](../architecture.md#one-migrate-call): validate; read history; plan;
   conflicts before the fast path; the fast path (one history read, no lock, `report.lockWait == null`); the topology
   check only when a transactional step is due; acquire; read history again; plan again; run; release in `finally`.
+  The sequence includes the `Unknown applied migrations` warning and the untracked-database guard, because every first
+  start on a database without history needs the guard's decision to run at all. Work that a later phase implements is
+  refused under the lock, before anything runs or is recorded, with `NotImplementedError` naming the phase: an
+  `inBatches` step (P4), a repeatable or every-start migration to run (P5), the adoption hook to call or a squash to
+  record (P6).
 - Running one migration, per [architecture](../architecture.md#running-one-migration): marker; `checkLock()` right
   after it; `Resuming interrupted migration` when the previous state was `RUNNING`; the outside step with its own counters; `checkLock()` between
   steps; `inTransaction` through `ClientSession.withTransaction` with snapshot read concern, majority write concern and
   primary reads; a fresh scope and counters per attempt; `Retrying transaction` and `transactionRetries`; `Slow
   transaction` above `slowTransactionWarning`; the fenced `APPLIED` record as the last write of the transaction; an
-  outside-only migration records `APPLIED` after its step.
+  outside-only migration records `APPLIED` after its step, and after a driver exception sends that fenced record once
+  more, then reads the document when the second write matches nothing.
 - The transaction wrapper: a pause before each attempt after the first (5 ms, x1.5 per attempt, at most 500 ms, with
   jitter); `Retrying transaction` for the first retry of a transaction, then at most every 10 s, with `error` the code
   name and code of the previous body's error or `commit`; every retry counted in `transactionRetries`.
@@ -413,15 +424,17 @@ driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (sco
   has a transactional step due that the first one did not.
 - Failure: the runner catches `Throwable` around steps, so an `Error` from a step (such as `SessionEscapeError`) fails
   the migration too; `FAILED` is written outside any transaction, fenced on the owner and `RUNNING`; when that write
-  matches nothing, the runner reads the document on the primary and treats `APPLIED` by this run as applied (a commit
-  whose reply failed), anything else as a lost lock; `MigrationFailedException` carries the step, the report so far,
+  matches nothing, its majority acknowledgement waits for the commit to be majority-committed, and the runner reads the
+  document on the primary and treats `APPLIED` by this run as applied (a commit whose reply failed), anything else as a
+  lost lock; `MigrationFailedException` carries the step, the report so far,
   the cause and the guidance line of [architecture](../architecture.md#error-guidance); a failed `FAILED` write leaves
   the document `RUNNING` and is attached as a suppressed exception; a lost lock writes nothing more and throws
   `LockLostException`, except that a step error that coincides with the lock loss is still written with the fenced
   `FAILED` write (it matches only while no other run has taken the document over) and becomes the
   `LockLostException`'s cause; the run stops at the first failure.
 - DDL helpers: `ensureCollection` (48 counts as existing), `dropIndexIfExists` (drops only what `listIndexes` shows,
-  so it returns false for a missing index on every server version; 27 from a concurrent drop counts as gone),
+  so it returns false for a missing index on every server version; 27 from a concurrent drop counts as gone before
+  MongoDB 8.3, and from 8.3, where the drop succeeds, two concurrent calls both return true),
   `ensureSearchIndex` (create unless a search index with the name exists, a concurrent create of the name counting as
   existing; with `awaitReady`, poll until queryable, also for an existing index that is not queryable yet, calling
   `checkLock()` between polls in the scope form; `SearchIndexNotReadyException` when the wait ends).
@@ -434,13 +447,14 @@ driver's `withTransaction`), `Topology.kt`, `ErrorGuidance.kt`, `Scopes.kt` (sco
 | Spec | Covers |
 |---|---|
 | `RunnerTest` | outside-only, transactional-only and two-step migrations; the prepared value reaches the transaction, and the same instance reaches every driver retry (a `TransientTransactionError` fail point with a prepared value the body would drain or a one-shot `Sequence`); counters from both steps add up; report fields; stop at the first failure; `status`, `requireUpToDate`, `history` |
-| `FastPathTest` | nothing due: exactly one command (`find` on `godwit-history`) and no command on `godwit-lock`, observed by a command listener; `lockWait` null |
-| `CrashWindowTest` | a child JVM (`CrashMain`) runs a scenario and is killed with `destroyForcibly()` at a point marked by a command listener in the child: after the marker, mid outside step, after the outside step, inside the transaction, and after the commit and before the release. The parent then runs `migrate` and asserts the resume, the `attempts` count, and that every transactional effect (an `$inc` probe) is 1 |
-| `TransactionRetryTest` | `failCommand` fail points: a `TransientTransactionError` re-runs the body with fresh counters and `attempt` 2, after a pause; an `UnknownTransactionCommitResult` retries only the commit; a transient error on commit logs `error=commit`; a body that conflicts for 5 s logs `Retrying transaction` at most once per 10 s and counts every retry; a commit that applies and then times out on the client (`timeoutMS`, a blocked majority acknowledgement) ends `APPLIED`, not `FAILED`, with the `$inc` probe at 1, also for an outside-only `APPLIED` record; `txRetries` in the report and log |
+| `FastPathTest` | nothing due: exactly one command (`find` on `godwit-history`) and no command on `godwit-lock`, observed by a command listener, also for a history longer than the server's default first batch of 101 documents; `lockWait` null |
+| `CrashWindowTest` | a child JVM (`CrashMain`) runs a scenario and is killed with `destroyForcibly()` at a point marked by a command listener in the child: after the marker, mid outside step, after the outside step, inside the transaction, and after the commit and before the release. The parent then runs `migrate` and asserts the resume, the `attempts` count, and that every transactional effect (an `$inc` probe) is 1. The transaction the child left open is ended with `killSessions`, as the server ends it when its lifetime passes, so the test does not wait 60 s |
+| `TransactionRetryTest` | `failCommand` fail points: a `TransientTransactionError` re-runs the body with fresh counters and `attempt` 2, after a pause; an `UnknownTransactionCommitResult` retries only the commit; a transient error on commit logs `error=commit`; a body that conflicts for 5 s logs `Retrying transaction` at most once per 10 s and counts every retry; a commit that applies and then times out on the client (`timeoutMS`, a blocked majority acknowledgement) ends `APPLIED`, not `FAILED`, with the `$inc` probe at 1, also for an outside-only `APPLIED` record, which godwit sends once more; `txRetries` in the report and log |
+| `MajorityLagTest` | a two-member replica set whose secondary stops replicating, so the majority lags behind the primary for longer than `timeoutMS`: an outside-only `APPLIED` record that times out is sent again and reported applied once the majority catches up (a majority read right after the timeout would still find `RUNNING`); when the second write times out too, the first exception propagates and the next start finds the migration `APPLIED`; a commit that times out is reported applied once the `FAILED` write's majority wait ends; when that write times out too, `MigrationFailedException` with it suppressed, and the next start finds the migration `APPLIED` without running it again |
 | `ErrorGuidanceTest` | 251 and 290 after a long attempt (the 60 s threshold is an internal constructor parameter set low in the test), 388, 263, an index build on an existing collection in a transaction, a session from another client; each message carries its guidance, and an unknown cause carries none |
-| `LockLossTest` | a run whose marker lands after another process took the lock over and wrote its own marker (the run's marker held back by a `blockConnection` fail point past the lease): the marker takes the document over, the `checkLock()` right after it throws before the outside step runs, the other process's fenced `APPLIED` write matches nothing and it throws `LockLostException`, and the next start applies the migration once; a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` without a cause; a step that throws its own error once the deadline has passed: `LockLostException` whose cause is that error, and the document `FAILED` with it as `lastError`; the same after another run's marker took the document: the cause is kept and the `FAILED` write matches nothing; an `inTransaction` call that fails with a network error once the deadline has passed (a `failCommand` fail point with `closeConnection`, which the driver labels `TransientTransactionError` inside a transaction, as it does a server selection timeout): the driver runs the body again, its first `checkLock()` throws, history is unchanged, `LockLostException` without a cause; the same call on a client with `timeoutMS` failing with `MongoOperationTimeoutException`, which `withTransaction` does not retry: `LockLostException` whose cause is the timeout |
-| `TopologyTest` | a standalone container: `TransactionsUnsupportedException` listing the due transactional migrations, before the lock; an outside-only list runs; a transactional repeatable that becomes due under the lock still throws `TransactionsUnsupportedException` |
-| `DdlHelpersTest` | each helper twice in a row; concurrent `ensureCollection` from two threads; `dropIndexIfExists` of a missing index returns false, also on a MongoDB 8.3 or later image |
+| `LockLossTest` | a run whose marker lands after another process took the lock over and wrote its own marker (the run's marker held back by a `blockConnection` fail point past the lease): the marker takes the document over, the `checkLock()` right after it throws before the outside step runs, the other process's fenced `APPLIED` write matches nothing and it throws `LockLostException`, and the next start applies the migration once; a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` without a cause; a step that throws its own error once the deadline has passed: `LockLostException` whose cause is that error, and the document `FAILED` with it as `lastError`; the same after another run's marker took the document: the cause is kept and the `FAILED` write matches nothing; an `inTransaction` call that fails with a network error once the deadline has passed (a `failCommand` fail point with `closeConnection`, which the driver labels `TransientTransactionError` inside a transaction, as it does a server selection timeout): the driver runs the body again, its first `checkLock()` throws, history is unchanged, `LockLostException` without a cause; the same call on a client with `timeoutMS` failing with `MongoOperationTimeoutException`, which `withTransaction` does not retry: `LockLostException` whose cause is the timeout; the runner's own checks, with steps that never call `checkLock()` while the heartbeat loses the lock: a transaction body that returns (nothing commits), an outside-only step that returns (nothing records it `APPLIED`), a two-step migration's outside step (the transaction never starts), and a loss right after one migration's commit (the next migration's marker is never sent); a commit that applies once the lock is lost and then times out: `LockLostException` with the timeout as its cause, and the migration `APPLIED` |
+| `TopologyTest` | a standalone container: `TransactionsUnsupportedException` listing the due transactional migrations, before the lock; an outside-only list runs; a transactional repeatable that becomes due under the lock still throws `TransactionsUnsupportedException`; on the replica set, one `hello` for a call whose plans before and under the lock both have a transactional step due |
+| `DdlHelpersTest` | each helper twice in a row; concurrent `ensureCollection` from two threads; `dropIndexIfExists` of a missing index returns false, also on a MongoDB 8.3 or later image (`mongoNewerImage`), where a drop that raced another one returns true |
 | `SearchIndexTest` (tag `Atlas`) | create, exists, wait until queryable, wait for an existing index that is still building, `SearchIndexNotReadyException`, `checkLock()` between polls |
 | `LogCatalogueTest` | every event this phase emits, with its level and keys |
 
