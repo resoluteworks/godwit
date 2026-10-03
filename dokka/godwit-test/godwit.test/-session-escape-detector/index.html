@@ -1,0 +1,160 @@
+<!doctype html>
+<html class="no-js" lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" charset="UTF-8">
+    <title>SessionEscapeDetector</title>
+<link href="../../../images/logo-icon.svg" rel="icon" type="image/svg"><script>var pathToRoot = "../../../";</script>
+    <script>document.documentElement.classList.replace("no-js", "js");</script>
+    <script>const storage = localStorage.getItem("dokka-dark-mode")
+      if (storage == null) {
+        const osDarkSchemePreferred = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        if (osDarkSchemePreferred === true) {
+          document.getElementsByTagName("html")[0].classList.add("theme-dark")
+        }
+      } else {
+        const savedDarkMode = JSON.parse(storage)
+        if (savedDarkMode === true) {
+          document.getElementsByTagName("html")[0].classList.add("theme-dark")
+        }
+      }
+    </script>
+<script type="text/javascript" src="../../../scripts/sourceset_dependencies.js" async></script>
+<link href="../../../styles/style.css" rel="Stylesheet">
+<link href="../../../styles/main.css" rel="Stylesheet">
+<link href="../../../styles/prism.css" rel="Stylesheet">
+<link href="../../../styles/logo-styles.css" rel="Stylesheet">
+<link href="../../../ui-kit/ui-kit.min.css" rel="Stylesheet">
+<script type="text/javascript" src="../../../scripts/safe-local-storage_blocking.js"></script>
+<script type="text/javascript" src="../../../scripts/navigation-loader.js" async></script>
+<script type="text/javascript" src="../../../scripts/platform-content-handler.js" async></script>
+<script type="text/javascript" src="../../../scripts/main.js" defer></script>
+<script type="text/javascript" src="../../../scripts/prism.js" async></script>
+<script type="text/javascript" src="../../../ui-kit/ui-kit.min.js" defer></script></head>
+<body>
+<div class="root">
+    <header class="navigation theme-dark" id="navigation-wrapper" role="banner">
+<a class="library-name--link" href="../../../index.html" tabindex="1">
+                    godwit
+            </a>        <button class="navigation-controls--btn navigation-controls--btn_toc ui-kit_mobile-only" id="toc-toggle" type="button">Toggle table of contents
+        </button>
+        <div class="navigation-controls--break ui-kit_mobile-only"></div>
+        <div class="library-version" id="library-version">
+        </div>
+        <div class="navigation-controls">
+        <ul class="filter-section filter-section_loading" id="filter-section" aria-label="Target filter">
+                <button class="platform-tag platform-selector jvm-like" data-active="" aria-pressed="true" data-filter=":godwit-test/main">jvm</button>
+            <div class="dropdown filter-section--dropdown" data-role="dropdown" id="filter-section-dropdown">
+                <button class="button button_dropdown filter-section--dropdown-toggle" role="combobox" data-role="dropdown-toggle" aria-controls="platform-tags-listbox" aria-haspopup="listbox" aria-expanded="false" aria-label="Toggle source sets"></button>
+                <ul role="listbox" id="platform-tags-listbox" class="dropdown--list" data-role="dropdown-listbox" aria-label="Target filter">
+                    <div class="dropdown--header"><span>Target filter</span>
+                        <button class="button" data-role="dropdown-toggle" aria-label="Close target filter">
+                            <i class="ui-kit-icon ui-kit-icon_cross"></i>
+                        </button>
+                    </div>
+                        <li role="option" class="dropdown--option platform-selector-option jvm-like" tabindex="0">
+                            <label class="checkbox">
+                                <input type="checkbox" class="checkbox--input" id=":godwit-test/main" data-filter=":godwit-test/main">
+                                <span class="checkbox--icon"></span>
+                                jvm
+                            </label>
+                        </li>
+                </ul>
+                <div class="dropdown--overlay"></div>
+            </div>
+        </ul>
+            <button class="navigation-controls--btn navigation-controls--btn_theme" id="theme-toggle-button" type="button">Switch theme
+            </button>
+            <div class="navigation-controls--btn navigation-controls--btn_search" id="searchBar" role="button">Search in
+                API
+            </div>
+        </div>
+    </header>
+    <div id="container">
+        <nav id="leftColumn" class="sidebar" data-item-type="SECTION" data-item-config="{&quot;defaultSize&quot;: 280, &quot;minSize&quot;: 200, &quot;maxSize&quot;: 400}">
+            <a class="toc--skip-link" href="#main">Skip to content</a>
+            <div class="dropdown theme-dark_mobile" data-role="dropdown" id="toc-dropdown">
+                <ul role="listbox" id="toc-listbox" class="dropdown--list dropdown--list_toc-list" data-role="dropdown-listbox" aria-label="Table of contents">
+                    <div class="dropdown--header">
+                            <span>
+                                    godwit
+                            </span>
+                        <button class="button" data-role="dropdown-toggle" aria-label="Close table of contents">
+                            <i class="ui-kit-icon ui-kit-icon_cross"></i>
+                        </button>
+                    </div>
+                    <div class="sidebar--inner" id="sideMenu"></div>
+                </ul>
+                <div class="dropdown--overlay"></div>
+            </div>
+        </nav>
+        <div id="resizer" class="resizer" data-item-type="BAR"></div>
+        <div id="main" data-item-type="SECTION" role="main">
+<div class="main-content" data-page-type="classlike" id="content" pageids="godwit-test::godwit.test/SessionEscapeDetector///PointingToDeclaration//-1157318457">
+  <div class="breadcrumbs"><a href="../../index.html">godwit-test</a><span class="delimiter">/</span><a href="../index.html">godwit.test</a><span class="delimiter">/</span><span class="current">SessionEscapeDetector</span></div>
+  <div class="cover ">
+    <h1 class="cover"><span>Session</span><wbr><span>Escape</span><wbr><span><span>Detector</span></span></h1>
+    <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-test/main"><div class="symbol monospace"><span class="token keyword">class </span><a href="index.html">SessionEscapeDetector</a> : <span data-unresolved-link="com.mongodb.event/CommandListener///PointingToDeclaration/">CommandListener</span></div><p class="paragraph">Fails a test whose transactional step runs a database command without the step's session.</p><p class="paragraph">The sync driver calls command listeners on the thread that runs the command. godwit opens each transaction of a transactional step with its own command before the step body runs: a read whose <code class="lang-kotlin">comment</code> is <code class="lang-kotlin">{godwit: &lt;migration id&gt;}</code>, which the driver sends with <code class="lang-kotlin">startTransaction: true</code>. The detector records that command's session id (<code class="lang-kotlin">lsid</code>) and transaction number (<code class="lang-kotlin">txnNumber</code>). Until a <code class="lang-kotlin">commitTransaction</code> or <code class="lang-kotlin">abortTransaction</code> for that session ends the transaction, every command on that thread must carry the same <code class="lang-kotlin">lsid</code>, the same <code class="lang-kotlin">txnNumber</code> and <code class="lang-kotlin">autocommit: false</code>, which the driver adds to commands sent with the transaction's session. The whole body is covered.</p><p class="paragraph">A command without them is an escape: one sent without a session, and one sent with another session, such as a service that starts a session and a transaction of its own. The detector throws <a href="../-session-escape-error/index.html">SessionEscapeError</a> from the listener before the command is sent. The driver passes errors from listeners through, so the escaping call throws, the step fails, and the test fails with the command and collection named. A commit or abort of another session does not end the tracked transaction. An abort of another session is let through: it only rolls back that session's own transaction, and failing it would replace the escape that made the session abort. Commands from other threads are not checked, and neither are transactions that godwit does not open, such as a test's own.</p><p class="paragraph">godwit's own commands, which carry a <code class="lang-kotlin">{godwit: ...}</code> comment too (every history and lock command), are never escapes: godwit sends them outside a step's transaction only once that transaction is over. One outside the tracked transaction ends it, so a transaction whose commit or abort the detector never saw (the thread was interrupted, or the abort found no server, before the listener was called) ends at godwit's next command on that thread; a read that opens the next step's transaction tracks that one instead. <a href="../test-godwit.html">testGodwit</a> also ends it on the calling thread, as a test starts there. A commit or abort of the step's own session ends it too, so the detector checks nothing after a service commits or aborts the session it was given; godwit fails that step itself.</p><p class="paragraph"><a href="../test-godwit.html">testGodwit</a> installs one. An app's own test client installs it with <code class="lang-kotlin">MongoClientSettings.builder().addCommandListener(SessionEscapeDetector())</code>.</p></div></div>
+  </div>
+  <div class="tabbedcontent">
+    <div class="tabs-section" tabs-section="tabs-section"><button class="section-tab" data-active="" data-togglable="CONSTRUCTOR,TYPE,PROPERTY,FUNCTION">Members</button></div>
+    <div class="tabs-section-body">
+      <div data-togglable="CONSTRUCTOR">
+        <h2 class="tableheader">Constructors</h2>
+        <div class="table"><a data-name="1674242311%2FConstructors%2F-1157318457" anchor-label="SessionEscapeDetector" id="1674242311%2FConstructors%2F-1157318457" data-filterable-set=":godwit-test/main"></a>
+          <div class="table-row table-row_content" data-togglable="CONSTRUCTOR" data-filterable-current=":godwit-test/main" data-filterable-set=":godwit-test/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="-session-escape-detector.html"><span>Session</span><wbr><span>Escape</span><wbr><span><span>Detector</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="1674242311%2FConstructors%2F-1157318457"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-test/main"><div class="symbol monospace"><span class="token keyword">constructor</span><span class="token punctuation">(</span><span class="token punctuation">)</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div data-togglable="FUNCTION">
+        <h2 class="tableheader">Functions</h2>
+        <div class="table"><a data-name="-1420391493%2FFunctions%2F-1157318457" anchor-label="commandStarted" id="-1420391493%2FFunctions%2F-1157318457" data-filterable-set=":godwit-test/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-test/main" data-filterable-set=":godwit-test/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="command-started.html"><span>command</span><wbr><span><span>Started</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1420391493%2FFunctions%2F-1157318457"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-test/main"><div class="symbol monospace"><span class="token keyword">open </span><span class="token keyword">override </span><span class="token keyword">fun </span><a href="command-started.html"><span class="token function">commandStarted</span></a><span class="token punctuation">(</span><span class="parameters "><span class="parameter ">event<span class="token operator">: </span><span data-unresolved-link="com.mongodb.event/CommandStartedEvent///PointingToDeclaration/">CommandStartedEvent</span></span></span><span class="token punctuation">)</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+    <div class="footer">
+        <div class="footer--container">
+            <a href="#content" id="go-to-top-link" class="footer--button footer--button_go-to-top"></a>
+            <div class="footer--content">
+                <div>
+                    <span>Generated by </span>
+                    <a class="footer--link footer--link_external" href="https://github.com/Kotlin/dokka">
+                        Dokka
+                    </a>
+                    <div>© 2026 Copyright</div>
+                </div>
+            </div>
+        </div>
+    </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

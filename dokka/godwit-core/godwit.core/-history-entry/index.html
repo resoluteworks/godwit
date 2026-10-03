@@ -1,0 +1,456 @@
+<!doctype html>
+<html class="no-js" lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" charset="UTF-8">
+    <title>HistoryEntry</title>
+<link href="../../../images/logo-icon.svg" rel="icon" type="image/svg"><script>var pathToRoot = "../../../";</script>
+    <script>document.documentElement.classList.replace("no-js", "js");</script>
+    <script>const storage = localStorage.getItem("dokka-dark-mode")
+      if (storage == null) {
+        const osDarkSchemePreferred = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        if (osDarkSchemePreferred === true) {
+          document.getElementsByTagName("html")[0].classList.add("theme-dark")
+        }
+      } else {
+        const savedDarkMode = JSON.parse(storage)
+        if (savedDarkMode === true) {
+          document.getElementsByTagName("html")[0].classList.add("theme-dark")
+        }
+      }
+    </script>
+<script type="text/javascript" src="../../../scripts/sourceset_dependencies.js" async></script>
+<link href="../../../styles/style.css" rel="Stylesheet">
+<link href="../../../styles/main.css" rel="Stylesheet">
+<link href="../../../styles/prism.css" rel="Stylesheet">
+<link href="../../../styles/logo-styles.css" rel="Stylesheet">
+<link href="../../../ui-kit/ui-kit.min.css" rel="Stylesheet">
+<script type="text/javascript" src="../../../scripts/safe-local-storage_blocking.js"></script>
+<script type="text/javascript" src="../../../scripts/navigation-loader.js" async></script>
+<script type="text/javascript" src="../../../scripts/platform-content-handler.js" async></script>
+<script type="text/javascript" src="../../../scripts/main.js" defer></script>
+<script type="text/javascript" src="../../../scripts/prism.js" async></script>
+<script type="text/javascript" src="../../../ui-kit/ui-kit.min.js" defer></script></head>
+<body>
+<div class="root">
+    <header class="navigation theme-dark" id="navigation-wrapper" role="banner">
+<a class="library-name--link" href="../../../index.html" tabindex="1">
+                    godwit
+            </a>        <button class="navigation-controls--btn navigation-controls--btn_toc ui-kit_mobile-only" id="toc-toggle" type="button">Toggle table of contents
+        </button>
+        <div class="navigation-controls--break ui-kit_mobile-only"></div>
+        <div class="library-version" id="library-version">
+        </div>
+        <div class="navigation-controls">
+        <ul class="filter-section filter-section_loading" id="filter-section" aria-label="Target filter">
+                <button class="platform-tag platform-selector jvm-like" data-active="" aria-pressed="true" data-filter=":godwit-core/main">jvm</button>
+            <div class="dropdown filter-section--dropdown" data-role="dropdown" id="filter-section-dropdown">
+                <button class="button button_dropdown filter-section--dropdown-toggle" role="combobox" data-role="dropdown-toggle" aria-controls="platform-tags-listbox" aria-haspopup="listbox" aria-expanded="false" aria-label="Toggle source sets"></button>
+                <ul role="listbox" id="platform-tags-listbox" class="dropdown--list" data-role="dropdown-listbox" aria-label="Target filter">
+                    <div class="dropdown--header"><span>Target filter</span>
+                        <button class="button" data-role="dropdown-toggle" aria-label="Close target filter">
+                            <i class="ui-kit-icon ui-kit-icon_cross"></i>
+                        </button>
+                    </div>
+                        <li role="option" class="dropdown--option platform-selector-option jvm-like" tabindex="0">
+                            <label class="checkbox">
+                                <input type="checkbox" class="checkbox--input" id=":godwit-core/main" data-filter=":godwit-core/main">
+                                <span class="checkbox--icon"></span>
+                                jvm
+                            </label>
+                        </li>
+                </ul>
+                <div class="dropdown--overlay"></div>
+            </div>
+        </ul>
+            <button class="navigation-controls--btn navigation-controls--btn_theme" id="theme-toggle-button" type="button">Switch theme
+            </button>
+            <div class="navigation-controls--btn navigation-controls--btn_search" id="searchBar" role="button">Search in
+                API
+            </div>
+        </div>
+    </header>
+    <div id="container">
+        <nav id="leftColumn" class="sidebar" data-item-type="SECTION" data-item-config="{&quot;defaultSize&quot;: 280, &quot;minSize&quot;: 200, &quot;maxSize&quot;: 400}">
+            <a class="toc--skip-link" href="#main">Skip to content</a>
+            <div class="dropdown theme-dark_mobile" data-role="dropdown" id="toc-dropdown">
+                <ul role="listbox" id="toc-listbox" class="dropdown--list dropdown--list_toc-list" data-role="dropdown-listbox" aria-label="Table of contents">
+                    <div class="dropdown--header">
+                            <span>
+                                    godwit
+                            </span>
+                        <button class="button" data-role="dropdown-toggle" aria-label="Close table of contents">
+                            <i class="ui-kit-icon ui-kit-icon_cross"></i>
+                        </button>
+                    </div>
+                    <div class="sidebar--inner" id="sideMenu"></div>
+                </ul>
+                <div class="dropdown--overlay"></div>
+            </div>
+        </nav>
+        <div id="resizer" class="resizer" data-item-type="BAR"></div>
+        <div id="main" data-item-type="SECTION" role="main">
+<div class="main-content" data-page-type="classlike" id="content" pageids="godwit-core::godwit.core/HistoryEntry///PointingToDeclaration//1787146196">
+  <div class="breadcrumbs"><a href="../../index.html">godwit-core</a><span class="delimiter">/</span><a href="../index.html">godwit.core</a><span class="delimiter">/</span><span class="current">HistoryEntry</span></div>
+  <div class="cover ">
+    <h1 class="cover"><span>History</span><wbr><span><span>Entry</span></span></h1>
+    <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">class </span><a href="index.html">HistoryEntry</a></div><p class="paragraph">One history document, as <a href="../-godwit/history.html">Godwit.history</a> reads it.</p><p class="paragraph">The stored document, in <a href="../-godwit-config/history-collection.html">GodwitConfig.historyCollection</a>:</p><div class="table--container"><table><thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead><tbody><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">_id</code></td><td>String</td><td>The migration id</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">kind</code></td><td>String</td><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">ONCE</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">EVERY_START</code> or <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">REPEATABLE</code></td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">revision</code></td><td>String?</td><td>A repeatable's revision</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">description</code></td><td>String?</td><td>As of the last run</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">steps</code></td><td><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a></td><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">OUTSIDE_TRANSACTION</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">IN_TRANSACTION</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">IN_BATCHES</code></td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">state</code></td><td>String</td><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">RUNNING</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">FAILED</code> or <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">APPLIED</code></td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">origin</code></td><td>String</td><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">RAN</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">ADOPTED</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">SUPERSEDED</code> or <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">MARKED</code></td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">attempts</code></td><td>Int</td><td>Runs started since the last APPLIED</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">transactionRetries</code></td><td>Int</td><td>Driver retries of transaction bodies in the successful run</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">counts</code></td><td>Document</td><td>The steps' counters, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">{ordersUpdated: 1200}</code></td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">durationMs</code></td><td>Long</td><td>Duration of the last run</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">startedAt</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">finishedAt</code></td><td>Date</td><td>Client clock, informational</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">lastError</code></td><td>Document?</td><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">{type, message, stack, step, at}</code>; removed when APPLIED</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">checkpoint</code></td><td>Document?</td><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">{lastId, batches, counts}</code> while an <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">inBatches</code> step is unfinished</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">runCount</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">lastRunAt</code></td><td>Long, Date</td><td>Successful runs of a repeatable or every-start migration</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">supersedes</code></td><td><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a>?</td><td>The ids a superseding migration replaces</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">outOfOrder</code></td><td>Boolean?</td><td>Ran under <a href="../-out-of-order/-r-u-n/index.html">OutOfOrder.RUN</a></td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">reason</code></td><td>String?</td><td>The <a href="../-godwit/mark-applied.html">Godwit.markApplied</a> reason</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">holder</code></td><td>String</td><td><a href="../-godwit-config/holder.html">GodwitConfig.holder</a> of the process that last wrote it</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">owner</code></td><td>String</td><td>Lock token of the run that last wrote <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">state</code>; fences a stale run</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">runId</code></td><td>String</td><td><a href="../-migration-report/run-id.html">MigrationReport.runId</a> of the call that last wrote it</td></tr><tr><td><code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">godwitVersion</code>, <code class="org.jetbrains.dokka.pages.commenttable@219802f6 lang-kotlin">v</code></td><td>String, Int</td><td>Writer version and document format version (1)</td></tr></tbody></table></div></div></div>
+  </div>
+  <div class="tabbedcontent">
+    <div class="tabs-section" tabs-section="tabs-section"><button class="section-tab" data-active="" data-togglable="CONSTRUCTOR,TYPE,PROPERTY,FUNCTION">Members</button></div>
+    <div class="tabs-section-body">
+      <div data-togglable="PROPERTY">
+        <h2 class="tableheader">Properties</h2>
+        <div class="table"><a data-name="2091824686%2FProperties%2F1787146196" anchor-label="attempts" id="2091824686%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="attempts.html"><span><span>attempts</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="2091824686%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="attempts.html">attempts</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-int/index.html">Int</a></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1171835796%2FProperties%2F1787146196" anchor-label="checkpoint" id="-1171835796%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="checkpoint.html"><span><span>checkpoint</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1171835796%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="checkpoint.html">checkpoint</a><span class="token operator">: </span><a href="../-batch-checkpoint/index.html">BatchCheckpoint</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="2127255472%2FProperties%2F1787146196" anchor-label="counts" id="2127255472%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="counts.html"><span><span>counts</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="2127255472%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="counts.html">counts</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.collections/-map/index.html">Map</a><span class="token operator">&lt;</span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token punctuation">, </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-long/index.html">Long</a><span class="token operator">&gt;</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1850549014%2FProperties%2F1787146196" anchor-label="description" id="-1850549014%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="description.html"><span><span>description</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1850549014%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="description.html">description</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1249508448%2FProperties%2F1787146196" anchor-label="duration" id="-1249508448%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="duration.html"><span><span>duration</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1249508448%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="duration.html">duration</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.time/-duration/index.html">Duration</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="116733007%2FProperties%2F1787146196" anchor-label="finishedAt" id="116733007%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="finished-at.html"><span>finished</span><wbr><span><span>At</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="116733007%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="finished-at.html">finishedAt</a><span class="token operator">: </span><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/Instant.html">Instant</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-102010028%2FProperties%2F1787146196" anchor-label="godwitVersion" id="-102010028%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="godwit-version.html"><span>godwit</span><wbr><span><span>Version</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-102010028%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="godwit-version.html">godwitVersion</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1379622840%2FProperties%2F1787146196" anchor-label="holder" id="-1379622840%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="holder.html"><span><span>holder</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1379622840%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="holder.html">holder</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1944699079%2FProperties%2F1787146196" anchor-label="id" id="-1944699079%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="id.html"><span><span>id</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1944699079%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="id.html">id</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="1464592672%2FProperties%2F1787146196" anchor-label="kind" id="1464592672%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="kind.html"><span><span>kind</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="1464592672%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="kind.html">kind</a><span class="token operator">: </span><a href="../-migration-kind/index.html">MigrationKind</a></div><div class="brief "><p class="paragraph">For a repeatable, carries the stored revision: empty until a run of the repeatable applies.</p></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-533299500%2FProperties%2F1787146196" anchor-label="lastError" id="-533299500%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="last-error.html"><span>last</span><wbr><span><span>Error</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-533299500%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="last-error.html">lastError</a><span class="token operator">: </span><a href="../-last-error/index.html">LastError</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="1489529214%2FProperties%2F1787146196" anchor-label="lastRunAt" id="1489529214%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="last-run-at.html"><span>last</span><wbr><span>Run</span><wbr><span><span>At</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="1489529214%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="last-run-at.html">lastRunAt</a><span class="token operator">: </span><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/Instant.html">Instant</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="1988787214%2FProperties%2F1787146196" anchor-label="origin" id="1988787214%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="origin.html"><span><span>origin</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="1988787214%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="origin.html">origin</a><span class="token operator">: </span><a href="../-origin/index.html">Origin</a></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1538494325%2FProperties%2F1787146196" anchor-label="outOfOrder" id="-1538494325%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="out-of-order.html"><span>out</span><wbr><span>Of</span><wbr><span><span>Order</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1538494325%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="out-of-order.html">outOfOrder</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-boolean/index.html">Boolean</a></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="62109360%2FProperties%2F1787146196" anchor-label="reason" id="62109360%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="reason.html"><span><span>reason</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="62109360%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="reason.html">reason</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="2088161776%2FProperties%2F1787146196" anchor-label="runCount" id="2088161776%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="run-count.html"><span>run</span><wbr><span><span>Count</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="2088161776%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="run-count.html">runCount</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-long/index.html">Long</a><span class="token operator">?</span></div><div class="brief "><p class="paragraph">Successful runs of a repeatable or every-start migration; null for a once-only one.</p></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1128585760%2FProperties%2F1787146196" anchor-label="runId" id="-1128585760%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="run-id.html"><span>run</span><wbr><span><span>Id</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1128585760%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="run-id.html">runId</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-1204165230%2FProperties%2F1787146196" anchor-label="startedAt" id="-1204165230%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="started-at.html"><span>started</span><wbr><span><span>At</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-1204165230%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="started-at.html">startedAt</a><span class="token operator">: </span><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/Instant.html">Instant</a><span class="token operator">?</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-68046667%2FProperties%2F1787146196" anchor-label="state" id="-68046667%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="state.html"><span><span>state</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-68046667%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="state.html">state</a><span class="token operator">: </span><a href="../-history-state/index.html">HistoryState</a></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-204204321%2FProperties%2F1787146196" anchor-label="steps" id="-204204321%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="steps.html"><span><span>steps</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-204204321%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="steps.html">steps</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.collections/-list/index.html">List</a><span class="token operator">&lt;</span><a href="../-step-kind/index.html">StepKind</a><span class="token operator">&gt;</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="-126731601%2FProperties%2F1787146196" anchor-label="supersedes" id="-126731601%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="supersedes.html"><span><span>supersedes</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="-126731601%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="supersedes.html">supersedes</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.collections/-list/index.html">List</a><span class="token operator">&lt;</span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token operator">&gt;</span></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+<a data-name="868969068%2FProperties%2F1787146196" anchor-label="transactionRetries" id="868969068%2FProperties%2F1787146196" data-filterable-set=":godwit-core/main"></a>
+          <div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main">
+            <div class="main-subrow keyValue ">
+              <div class=""><span class="inline-flex">
+                  <div><a href="transaction-retries.html"><span>transaction</span><wbr><span><span>Retries</span></span></a></div>
+<span class="anchor-wrapper"><span class="anchor-icon" pointing-to="868969068%2FProperties%2F1787146196"></span>
+                    <div class="copy-popup-wrapper "><span class="copy-popup-icon"></span><span>Link copied to clipboard</span></div>
+                  </span></span></div>
+              <div>
+                <div class="title">
+                  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">val </span><a href="transaction-retries.html">transactionRetries</a><span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-int/index.html">Int</a></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+    <div class="footer">
+        <div class="footer--container">
+            <a href="#content" id="go-to-top-link" class="footer--button footer--button_go-to-top"></a>
+            <div class="footer--content">
+                <div>
+                    <span>Generated by </span>
+                    <a class="footer--link footer--link_external" href="https://github.com/Kotlin/dokka">
+                        Dokka
+                    </a>
+                    <div>© 2026 Copyright</div>
+                </div>
+            </div>
+        </div>
+    </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

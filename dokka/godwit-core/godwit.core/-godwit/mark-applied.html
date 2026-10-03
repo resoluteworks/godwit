@@ -1,0 +1,117 @@
+<!doctype html>
+<html class="no-js" lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" charset="UTF-8">
+    <title>markApplied</title>
+<link href="../../../images/logo-icon.svg" rel="icon" type="image/svg"><script>var pathToRoot = "../../../";</script>
+    <script>document.documentElement.classList.replace("no-js", "js");</script>
+    <script>const storage = localStorage.getItem("dokka-dark-mode")
+      if (storage == null) {
+        const osDarkSchemePreferred = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        if (osDarkSchemePreferred === true) {
+          document.getElementsByTagName("html")[0].classList.add("theme-dark")
+        }
+      } else {
+        const savedDarkMode = JSON.parse(storage)
+        if (savedDarkMode === true) {
+          document.getElementsByTagName("html")[0].classList.add("theme-dark")
+        }
+      }
+    </script>
+<script type="text/javascript" src="../../../scripts/sourceset_dependencies.js" async></script>
+<link href="../../../styles/style.css" rel="Stylesheet">
+<link href="../../../styles/main.css" rel="Stylesheet">
+<link href="../../../styles/prism.css" rel="Stylesheet">
+<link href="../../../styles/logo-styles.css" rel="Stylesheet">
+<link href="../../../ui-kit/ui-kit.min.css" rel="Stylesheet">
+<script type="text/javascript" src="../../../scripts/safe-local-storage_blocking.js"></script>
+<script type="text/javascript" src="../../../scripts/navigation-loader.js" async></script>
+<script type="text/javascript" src="../../../scripts/platform-content-handler.js" async></script>
+<script type="text/javascript" src="../../../scripts/main.js" defer></script>
+<script type="text/javascript" src="../../../scripts/prism.js" async></script>
+<script type="text/javascript" src="../../../ui-kit/ui-kit.min.js" defer></script></head>
+<body>
+<div class="root">
+    <header class="navigation theme-dark" id="navigation-wrapper" role="banner">
+<a class="library-name--link" href="../../../index.html" tabindex="1">
+                    godwit
+            </a>        <button class="navigation-controls--btn navigation-controls--btn_toc ui-kit_mobile-only" id="toc-toggle" type="button">Toggle table of contents
+        </button>
+        <div class="navigation-controls--break ui-kit_mobile-only"></div>
+        <div class="library-version" id="library-version">
+        </div>
+        <div class="navigation-controls">
+        <ul class="filter-section filter-section_loading" id="filter-section" aria-label="Target filter">
+                <button class="platform-tag platform-selector jvm-like" data-active="" aria-pressed="true" data-filter=":godwit-core/main">jvm</button>
+            <div class="dropdown filter-section--dropdown" data-role="dropdown" id="filter-section-dropdown">
+                <button class="button button_dropdown filter-section--dropdown-toggle" role="combobox" data-role="dropdown-toggle" aria-controls="platform-tags-listbox" aria-haspopup="listbox" aria-expanded="false" aria-label="Toggle source sets"></button>
+                <ul role="listbox" id="platform-tags-listbox" class="dropdown--list" data-role="dropdown-listbox" aria-label="Target filter">
+                    <div class="dropdown--header"><span>Target filter</span>
+                        <button class="button" data-role="dropdown-toggle" aria-label="Close target filter">
+                            <i class="ui-kit-icon ui-kit-icon_cross"></i>
+                        </button>
+                    </div>
+                        <li role="option" class="dropdown--option platform-selector-option jvm-like" tabindex="0">
+                            <label class="checkbox">
+                                <input type="checkbox" class="checkbox--input" id=":godwit-core/main" data-filter=":godwit-core/main">
+                                <span class="checkbox--icon"></span>
+                                jvm
+                            </label>
+                        </li>
+                </ul>
+                <div class="dropdown--overlay"></div>
+            </div>
+        </ul>
+            <button class="navigation-controls--btn navigation-controls--btn_theme" id="theme-toggle-button" type="button">Switch theme
+            </button>
+            <div class="navigation-controls--btn navigation-controls--btn_search" id="searchBar" role="button">Search in
+                API
+            </div>
+        </div>
+    </header>
+    <div id="container">
+        <nav id="leftColumn" class="sidebar" data-item-type="SECTION" data-item-config="{&quot;defaultSize&quot;: 280, &quot;minSize&quot;: 200, &quot;maxSize&quot;: 400}">
+            <a class="toc--skip-link" href="#main">Skip to content</a>
+            <div class="dropdown theme-dark_mobile" data-role="dropdown" id="toc-dropdown">
+                <ul role="listbox" id="toc-listbox" class="dropdown--list dropdown--list_toc-list" data-role="dropdown-listbox" aria-label="Table of contents">
+                    <div class="dropdown--header">
+                            <span>
+                                    godwit
+                            </span>
+                        <button class="button" data-role="dropdown-toggle" aria-label="Close table of contents">
+                            <i class="ui-kit-icon ui-kit-icon_cross"></i>
+                        </button>
+                    </div>
+                    <div class="sidebar--inner" id="sideMenu"></div>
+                </ul>
+                <div class="dropdown--overlay"></div>
+            </div>
+        </nav>
+        <div id="resizer" class="resizer" data-item-type="BAR"></div>
+        <div id="main" data-item-type="SECTION" role="main">
+<div class="main-content" data-page-type="member" id="content" pageids="godwit-core::godwit.core/Godwit/markApplied/#kotlin.String#kotlin.String/PointingToDeclaration//1787146196">
+  <div class="breadcrumbs"><a href="../../index.html">godwit-core</a><span class="delimiter">/</span><a href="../index.html">godwit.core</a><span class="delimiter">/</span><a href="index.html">Godwit</a><span class="delimiter">/</span><span class="current">markApplied</span></div>
+  <div class="cover ">
+    <h1 class="cover"><span>mark</span><wbr><span><span>Applied</span></span></h1>
+  </div>
+  <div class="platform-hinted " data-platform-hinted="data-platform-hinted"><div class="content sourceset-dependent-content" data-active="" data-togglable=":godwit-core/main"><div class="symbol monospace"><span class="token keyword">fun </span><a href="mark-applied.html"><span class="token function">markApplied</span></a><span class="token punctuation">(</span><span class="parameters "><span class="parameter ">id<span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a><span class="token punctuation">, </span></span><span class="parameter ">reason<span class="token operator">: </span><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-string/index.html">String</a></span></span><span class="token punctuation">)</span></div><p class="paragraph">Records the once-only migration <a href="mark-applied.html">id</a> as APPLIED with origin <a href="../-origin/-m-a-r-k-e-d/index.html">Origin.MARKED</a> and <a href="mark-applied.html">reason</a>, without running anything: the audited escape hatch for a change applied by hand or a migration that must never run on this database. godwit rolls forward only; this is the one way to skip a once-only migration.</p><p class="paragraph">Waits for the lock like <a href="migrate.html">migrate</a>, then reads history under it. A once-only document that is RUNNING or FAILED, or a missing one, becomes APPLIED (a missing one is recorded as once-only); an APPLIED once-only document is left unchanged. The id is not checked against any list: a typo shows up as an unknown applied id on the next <a href="migrate.html">migrate</a>, and marking an id while once-only migrations listed before it are pending makes those out of order. To record several applied ids, stop every instance and mark the last-listed first: a start between two marks then finds the ids not yet marked pending before a marked one, which <a href="../-out-of-order/-f-a-i-l/index.html">OutOfOrder.FAIL</a> refuses; marked first-listed first, it would find a valid prefix and run the rest.</p><p class="paragraph">A MARKED document ends adoption and turns off the untracked-database guard: <a href="../-godwit-config/adopt-applied.html">GodwitConfig.adoptApplied</a> is not called while it exists. A mark made before the hook has recorded every applied id would let the ids it has not recorded run on the next <a href="migrate.html">migrate</a>, over the live data, so this refuses while adoption has not ended. A manual repair on such a database, such as recording what was applied after its history was lost while the old record remains, stops every instance and marks from a <a href="index.html">Godwit</a> built from the same configuration without the hook, <code class="lang-kotlin">config.copy(adoptApplied = null)</code>, so that the marks land in the history and lock collections the app uses.</p><h4 class="tableheader">Throws</h4><div class="table"><div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main"><div class="main-subrow keyValue "><div class=""><span class="inline-flex"><div><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-illegal-argument-exception/index.html"><span>Illegal</span><wbr><span>Argument</span><wbr><span><span>Exception</span></span></a></div></span></div><div><div class="title"><p class="paragraph">when <a href="mark-applied.html">reason</a> is blank (before taking the lock), or when the document of <a href="mark-applied.html">id</a> belongs to a repeatable or every-start migration, in any state, APPLIED included: a mark never changes whether such a migration runs, so the way past it is code. Nothing is written.</p></div></div></div></div><div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main"><div class="main-subrow keyValue "><div class=""><span class="inline-flex"><div><a href="https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/-illegal-state-exception/index.html"><span>Illegal</span><wbr><span>State</span><wbr><span><span>Exception</span></span></a></div></span></div><div><div class="title"><p class="paragraph">when <a href="../-godwit-config/adopt-applied.html">GodwitConfig.adoptApplied</a> is set and history holds no document whose origin is other than <a href="../-origin/-a-d-o-p-t-e-d/index.html">Origin.ADOPTED</a> (it is empty or holds only ADOPTED documents): adoption has not ended, and the hook still runs on every start that takes the lock. The check runs under the lock, on the same history read. Nothing is written. The message is "adoption has not ended on this database; run migrate() first so the adoptApplied hook adopts, or call markApplied from a Godwit built without adoptApplied".</p></div></div></div></div><div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main"><div class="main-subrow keyValue "><div class=""><span class="inline-flex"><div><a href="../-lock-timeout-exception/index.html"><span>Lock</span><wbr><span>Timeout</span><wbr><span><span>Exception</span></span></a></div></span></div><div><div class="title"><p class="paragraph">when another process holds the lock for longer than <a href="../-lock-config/wait-timeout.html">LockConfig.waitTimeout</a>.</p></div></div></div></div><div class="table-row table-row_content" data-filterable-current=":godwit-core/main" data-filterable-set=":godwit-core/main"><div class="main-subrow keyValue "><div class=""><span class="inline-flex"><div><a href="../-lock-lost-exception/index.html"><span>Lock</span><wbr><span>Lost</span><wbr><span><span>Exception</span></span></a></div></span></div><div><div class="title"><p class="paragraph">when the lock is lost before the write. Nothing is written.</p></div></div></div></div></div></div></div>
+</div>
+    <div class="footer">
+        <div class="footer--container">
+            <a href="#content" id="go-to-top-link" class="footer--button footer--button_go-to-top"></a>
+            <div class="footer--content">
+                <div>
+                    <span>Generated by </span>
+                    <a class="footer--link footer--link_external" href="https://github.com/Kotlin/dokka">
+                        Dokka
+                    </a>
+                    <div>© 2026 Copyright</div>
+                </div>
+            </div>
+        </div>
+    </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

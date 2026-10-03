@@ -1,0 +1,1 @@
+sourceset_dependencies = '{":godwit-core/main":[],":godwit-test/main":[]}'
