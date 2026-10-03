@@ -1,10 +1,9 @@
 # godwit
 
-**Status: pre-release `0.1.0`, not yet on Maven Central.** Version `0.1.0` is implemented and tested, and the examples
-on this page and in [docs](docs/) compile and run against it. Every version on `main` is published to this
-repository's GitHub Packages registry, `https://maven.pkg.github.com/resoluteworks/godwit`, which Gradle reads with a
-GitHub token that has the `read:packages` scope; `make publish-local` at the root of this repository installs it in
-Maven Local instead. godwit stays on 0.x until it has run in a production application
+**Status: `0.1.0`, on Maven Central.** The examples on this page and in [docs](docs/) compile and run against it.
+Every version on `main` is also published to this repository's GitHub Packages registry,
+`https://maven.pkg.github.com/resoluteworks/godwit`, which Gradle reads with a GitHub token that has the
+`read:packages` scope. godwit stays on 0.x until it has run in a production application
 ([DD-25](docs/design-decisions.md#dd-25-0x-until-proven-in-production)).
 
 godwit runs MongoDB schema and data migrations for Kotlin JVM applications. A migration is a plain Kotlin value, built
@@ -44,10 +43,8 @@ Kotlin standard library: the MongoDB Kotlin sync driver and slf4j-api.
 
 ### Add the dependencies
 
-godwit's artifacts go to Maven Central with its first release. Until then, run `make publish-local` at the root of
-this repository, which installs them in Maven Local, and keep the `mavenLocal` repository below, or declare the GitHub
-Packages registry above in its place, with a token as the password; once they are on Maven Central, `mavenCentral()`
-alone is enough. Set the version once in `gradle.properties`:
+godwit's artifacts are on Maven Central, so `mavenCentral()` is the only repository a build needs. Set the version
+once in `gradle.properties`:
 
 ```properties
 godwitVersion=<version>
@@ -59,10 +56,6 @@ and add the two artifacts in `build.gradle.kts`:
 val godwitVersion: String by project
 
 repositories {
-    // Only until godwit is on Maven Central: the artifacts `make publish-local` installs.
-    mavenLocal {
-        content { includeGroup("works.resolute") }
-    }
     mavenCentral()
 }
 
