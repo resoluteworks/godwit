@@ -41,9 +41,10 @@ internal val TRANSACTION_OPTIONS: TransactionOptions = TransactionOptions.builde
  * Both handles use the driver's default codec registry, majority read and write concern and primary reads, whatever
  * the app's client is configured with: a lock acquired with `w:1` can be rolled back by a failover and leave two
  * holders, a history read below majority can see an APPLIED record that is rolled back later, and the app's codecs
- * must not change how godwit reads its own documents. The lock handle adds [LOCK_OPERATION_TIMEOUT] to every
- * operation. The lock document's `_id` is the history collection's name, so two configurations with different history
- * collections have different locks.
+ * must not change how godwit reads its own documents. The driver applies the client's `uuidRepresentation` to the
+ * default registry all the same, which only a checkpoint's `lastId` can meet ([checkpoint]). The lock handle adds
+ * [LOCK_OPERATION_TIMEOUT] to every operation. The lock document's `_id` is the history collection's name, so two
+ * configurations with different history collections have different locks.
  */
 internal class Bookkeeping(private val cluster: MongoCluster, databaseName: String, config: GodwitConfig) {
     private val database = cluster.getDatabase(databaseName)

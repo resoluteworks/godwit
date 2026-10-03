@@ -12,6 +12,7 @@ import godwit.core.MigrationKind
 import godwit.core.Origin
 import godwit.core.StepKind
 import org.bson.Document
+import org.bson.codecs.configuration.CodecRegistry
 import org.bson.conversions.Bson
 import java.time.Instant
 import java.util.Date
@@ -50,6 +51,9 @@ internal data class FailedRun(val error: Throwable, val step: StepKind?, val dur
  */
 internal class HistoryStore(private val bookkeeping: Bookkeeping) {
     private val collection = bookkeeping.history
+
+    /** The codecs that decode the documents this store returns; encoding a value with them restores its BSON type. */
+    val codecs: CodecRegistry get() = collection.codecRegistry
 
     /**
      * Every document, sorted by `_id`: one `find`. Without a batch size the server's first batch stops at 101
@@ -167,6 +171,23 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
             collection.updateOne(session, fence, update)
         }
         if (result.matchedCount == 0L) throw LockLostException(migration.id)
+    }
+
+    /**
+     * Writes [checkpoint] as the document's `checkpoint` (`lastId` with its BSON type, `batches`, `counts`) on
+     * [session], inside the transaction of the page it follows, fenced on [owner] and `state: RUNNING` as the APPLIED
+     * record is. The page's writes and its checkpoint commit together.
+     *
+     * @throws LockLostException when the fence matches nothing: another run's marker carries another owner token. The
+     *   exception aborts the page's transaction.
+     */
+    fun writeCheckpoint(id: String, owner: String, checkpoint: Checkpoint, session: ClientSession) {
+        val stored = Document("lastId", checkpoint.lastId)
+            .append("batches", checkpoint.batches)
+            .append("counts", Document(checkpoint.counts))
+        val update = Document("\$set", Document("checkpoint", stored))
+        val result = collection.updateOne(session, ownedAndRunning(id, owner), update)
+        if (result.matchedCount == 0L) throw LockLostException(id)
     }
 
     /**

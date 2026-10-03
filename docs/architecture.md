@@ -223,8 +223,10 @@ run(m):
   the once-only filter matches that `RUNNING` document and takes it over. The other run acquired only after the
   server lease ended, at least `safetyMargin` after this run's local deadline, so this run's check after the marker
   throws `LockLostException` before any step runs. The run whose document was taken over finds out at its next fenced
-  write, which matches nothing: it throws `LockLostException` too, and the next start resumes the migration. A stale
-  marker costs a retry, never a second commit.
+  write, which matches nothing once its transaction reads the stale marker's owner token; a transaction that started
+  before the stale marker first conflicts with it on that write (`WriteConflict`, 112), and the driver runs the body
+  again. It throws `LockLostException` too, and the next start resumes the migration. A stale marker costs a retry,
+  never a second commit.
 - A run that lost the lock writes nothing more to history, with one exception: when a step's own error and the lock
   loss coincide, it still sends the `FAILED` write, so that `lastError` keeps the step's error. That write is fenced on
   this run's owner token and `RUNNING`, so it matches only while no other run has written its marker; once one has,
@@ -574,7 +576,7 @@ token and is `RUNNING`.
 |---|---|
 | The run holds the lock throughout | The record matches; data and record commit together |
 | The lock is lost, nobody has taken over | `checkLock()` before the record throws (the local deadline is at least `safetyMargin` before the lease ends): abort |
-| Another run took over and wrote its marker first | The marker changed `owner`: the record matches nothing, `LockLostException`, abort |
+| Another run took over and wrote its marker first | The marker changed `owner`. A transaction that started after the marker reads the new owner: the record matches nothing, `LockLostException`, abort. One that started before it conflicts with the marker on the record (`WriteConflict`, 112), so the driver runs the body again, and its first `checkLock()` throws: abort |
 | The stale run wrote its record first, then stalled before the commit | The new run's marker writes the same document outside any transaction, so it waits for the stale transaction to end. If it aborts (lifetime, or the stale run's own check), the marker goes through. If it commits, the marker's filter finds `APPLIED`, gets 11000 on both sends, and the new run skips the migration |
 
 In every row, exactly one run's work for the migration is committed or none is. The alternative fence, writing the lock
@@ -588,35 +590,62 @@ An `inBatches` step runs one transaction per page:
 ```text
 pages(m, checkpoint):                         checkpoint from the marker's returned document (null on a first run)
   idType = typeClass(checkpoint.lastId) when there is a checkpoint, else null
+  checked = false                             the other-type check passed just before this page's transaction
   loop:
     next = session.withTransaction {          the body only reads the loop's variables; it assigns none of them
         attempt += 1 (attempts count per page); pause before attempts after the first; counters start empty
         lock.checkLock()
-        filter = m.pending AND (_id > checkpoint.lastId, when there is a checkpoint)
+        filter = m.pending AND (_id after checkpoint.lastId, when there is a checkpoint)
         page = find(session, filter).sort({_id: 1}).limit(m.batchSize)
         pageType = idType ?: typeClass(page.first._id), when the page is not empty
         every _id in page has pageType, or fail naming both types
+        if page.size < m.batchSize and pageType != null and not checked:
+            Unchecked(pageType)                                       the last page: commits nothing, no step yet
         if page is not empty: m.step(scope, page)
         lock.checkLock()
+        batches = checkpoint.batches + 1, or checkpoint.batches when the page is empty
         if page.size < m.batchSize:                                   the last page, also when it is empty
-            if pageType != null:                                      null only on a first run that found nothing
-                no document matches m.pending with an _id of another type, or fail naming both types
-                                                                      on a resumed run, pageType is the checkpoint's
             recordApplied(session, m, checkpoint.counts + scope.counts + outside step counts)
-            Done
+            Done(batches)
         else:
-            newCheckpoint = (lastId = page.last._id, batches = checkpoint.batches + 1, counts = checkpoint.counts + scope.counts)
+            newCheckpoint = (lastId = page.last._id, batches, counts = checkpoint.counts + scope.counts)
             writeCheckpoint(session, newCheckpoint)
             Page(newCheckpoint, pageType)
     }
-    log DEBUG "Committed batch"
+    checked = false
+    if next is Unchecked:                     outside any transaction: majority read concern, on the session
+        no document matches m.pending with an _id of another class, or fail naming both types
+        idType = next.type; checked = true    the same page runs again, in a new transaction
+    log DEBUG "Committed batch", when next is a Page, or Done after a page that held documents
     if next is Page: checkpoint = next.checkpoint; idType = next.type   only after withTransaction returned
   until next is Done
 ```
 
-`typeClass` is the BSON type of an `_id`, except that int, long, double and decimal are one class: `$gt` and the `_id`
-sort compare numbers across numeric types, so a collection with int and long `_id`s pages correctly and passes the
-check. The other-type query uses `$type: "number"` for that class.
+`typeClass` is the class of an `_id`'s BSON type, named by its `$type` alias (`objectId`, `string`), except where `$gt`
+and the `_id` sort compare values across types: int, long, double and decimal are one class, `number`, and a symbol
+compares as a string, so string and symbol are the class `string`. A collection with int and long `_id`s pages
+correctly and passes the check. The other-type query lists the `$type` alias of every type an `_id` can have outside
+the run's class (`{_id: {$type: ["number", "string", "symbol", ...]}}`), which the `_id` index answers from bounds on
+those types alone, so it reads no document of the run's class. A class leaves the list as a whole: the bounds of
+`symbol` are those of every string, so a run of strings that listed `symbol` would read every string. `$not` with the
+run's class would read the whole collection, because the server cannot turn a negated `$type` into index bounds.
+
+The check still reads every document of another class that does not match `pending`: many of them, with no index that
+serves `pending`, make a long read. It runs between the last page's two transactions, outside any transaction, so it
+has no transaction lifetime to outlast. A `pending` narrowed to one `_id` type makes it read nothing.
+
+"After `checkpoint.lastId`" is `{_id: {$gt: lastId}}`, except after a NaN. NaN sorts before every other number, but
+`$gt: NaN` matches nothing, so after a NaN the filter is `{_id: {$gte: -Infinity}}`, every number but NaN. The unique
+`_id` index counts every NaN, double or decimal, as equal, so a collection holds one NaN `_id` at most.
+
+godwit reads each page as raw BSON: the `_id` types it checks and the `lastId` it stores are the stored ones, whatever
+codecs the app's client has. It renders `pending` and decodes the documents it hands to the step with the codecs of
+the app's client, as the step's own `collection(...)` would. A `lastId` read back from history is encoded again with
+the codecs that decoded it: the driver applies the client's `uuidRepresentation` to godwit's history collection too, so
+a UUID `_id` comes back as a `java.util.UUID` that only the same representation turns into the same binary.
+
+`batches` counts the pages that held documents: a last read that finds nothing commits only the `APPLIED` record, so
+1,000 matching documents in pages of 500 make two pages, not three.
 
 `writeCheckpoint` is the same fenced update as the `APPLIED` record, setting only `checkpoint`:
 
@@ -635,12 +664,17 @@ db.getCollection("godwit-history").updateOne(
   a transient error on commit; a body that had already moved the checkpoint would then read the next page and leave the
   rolled-back one unprocessed.
 - `pending` is evaluated on every page. A document that stops matching it (the app wrote the new field) is skipped.
-- `$gt` on `_id` compares values of one BSON type only (numbers as one class), so a collection with mixed `_id` types
-  would be partly skipped. The type checks turn that into a failure, with the committed pages and the checkpoint kept.
-  BSON order puts numbers before strings and strings before ObjectIds, so the committed pages hold the type that sorts
-  first, and a resumed run takes its type from the checkpoint, not from a page that may be empty.
-- A page of exactly `batchSize` documents is never the last; the next page finds nothing, and its transaction commits
-  only the `APPLIED` record. The step is never called with an empty page.
+- A run that lost the lock writes no checkpoint. Its check before the write throws once the local deadline has passed.
+  A takeover marker that committed after the page's transaction started conflicts with the checkpoint write
+  (`WriteConflict`, 112), and the page runs again, from a `checkLock()` that throws; a page that starts after the
+  marker reads its owner token, and the fenced write matches nothing. Either way the page rolls back.
+- `$gt` on `_id` compares values of one BSON type only (numbers as one class, strings and symbols as another), so a
+  collection with mixed `_id` types would be partly skipped. The type checks turn that into a failure, with the
+  committed pages and the checkpoint kept. BSON order puts numbers before strings and strings before ObjectIds, so the
+  committed pages hold the type that sorts first, and a resumed run takes its type from the checkpoint, not from a page
+  that may be empty.
+- A page of exactly `batchSize` documents is never the last; the next read finds nothing and, after the other-type
+  check, commits only the `APPLIED` record. The step is never called with an empty page.
 
 ## Error guidance
 
@@ -649,8 +683,10 @@ causes it recognises:
 
 | Cause | Recognised by | Guidance line |
 |---|---|---|
-| Transaction past its lifetime | `NoSuchTransaction` (251) or `TransactionExceededLifetimeLimitSeconds` (290) after an attempt that ran at least 60 s | `The transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
-| Transaction too large | `TransactionTooLargeForCache` (388) | `The transaction was too large for the storage engine's cache. Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
+| Transaction past its lifetime | `NoSuchTransaction` (251) or `TransactionExceededLifetimeLimitSeconds` (290) after an attempt that ran at least 60 s, in any step but `inBatches` | `The transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
+| Transaction too large | `TransactionTooLargeForCache` (388), in any step but `inBatches` | `The transaction was too large for the storage engine's cache. Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
+| A page past its lifetime | The same codes after an attempt of the failed page's transaction that ran at least 60 s, in an `inBatches` step | `The page's transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Lower batchSize, or, when few documents match pending, create an index that serves pending.` |
+| A page too large | `TransactionTooLargeForCache` (388), in an `inBatches` step | `The page's transaction was too large for the storage engine's cache. Lower batchSize.` |
 | DDL in a transaction | `OperationNotSupportedInTransaction` (263), or `InvalidOptions` (72) when `createIndexes` or `create` refuses the transaction's snapshot read concern | `DDL cannot run in a transaction: index builds on existing collections, drop, dropIndexes, renameCollection and collMod belong in outsideTransaction.` |
 | Session from another client | The driver's `IllegalStateException` "ClientSession from same MongoClient" | `The step passed godwit's session to an operation on another MongoClient. Build Godwit and the services the migrations call from the same MongoClient.` |
 
@@ -666,6 +702,7 @@ quotes a guidance line quotes it from this table, and the `MigrationFailedExcept
 | Marker, `FAILED`, outside-only `APPLIED`, adoption, squash and `markApplied` records | | majority | primary | the client's |
 | Lock acquire, renew, release, holder read | majority | majority | primary | 5 s per operation, client side |
 | A transactional step's transaction (body, checkpoint, `APPLIED` record) | snapshot | majority | primary | the server's transaction lifetime (60 s by default); the driver's 120 s retry window |
+| The other-type check before an `inBatches` step's last page | majority | | primary | the client's |
 | An outside step's operations | the client's | the client's | the client's | the client's |
 | `hello` (topology check) | | | primary | the client's |
 

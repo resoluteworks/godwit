@@ -34,6 +34,8 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldStartWith
 import org.bson.BsonBoolean
 import org.bson.BsonDocument
+import org.bson.BsonInt32
+import org.bson.BsonInt64
 import org.bson.Document
 import org.bson.codecs.StringCodec
 import org.bson.codecs.configuration.CodecConfigurationException
@@ -67,6 +69,7 @@ private val finishedAt: Instant = Instant.parse("2026-10-02T10:14:05.204Z")
 private val version: String = System.getProperty("godwit.version")
 
 private val orderStatus = migration("004-order-status").inTransaction { }
+private val totals = migration("006-order-totals").inBatches("orders", Document()) { }
 private val carts = migration("002-carts", description = "Carts and their indexes").outsideTransaction { }
 private val countries = repeatable("reference-countries", "2026-10-01", description = "\$countries").inTransaction { }
 private val bootstrap = everyStart("bootstrap-customers").outsideTransaction { }.inTransaction { }
@@ -514,6 +517,77 @@ class HistoryStoreTest : StringSpec() {
                 error.cause.shouldBeNull()
                 f.orders.countDocuments() shouldBe 0L
                 f.stored("004-order-status") shouldBe before
+            }
+        }
+
+        "the checkpoint is written in the page's transaction, fenced on owner and RUNNING, lastId keeping its type" {
+            Fixture().use { f ->
+                f.store.markRunning(totals, writer, startedAt)
+                f.recorder.clear()
+                val checkpoint = Checkpoint(BsonInt64(499), 1, mapOf("ordersUpdated" to 500L))
+
+                f.client.startSession().use { session ->
+                    session.withTransaction(
+                        {
+                            f.orders.insertOne(session, Document("_id", 1).append("totalMinor", 4200L))
+                            f.store.writeCheckpoint("006-order-totals", OWNER, checkpoint, session)
+                        },
+                        TRANSACTION_OPTIONS
+                    )
+                }
+
+                val command = f.sent("update")
+                val update = f.update(command)
+                update.getDocument("q") shouldBe json(
+                    """{"_id": "006-order-totals", "owner": "$OWNER", "state": "RUNNING"}"""
+                )
+                update.getDocument("u") shouldBe json(
+                    $$"""
+                    {
+                      "$set": {
+                        "checkpoint": {
+                          "lastId": {"$numberLong": "499"}, "batches": 1,
+                          "counts": {"ordersUpdated": {"$numberLong": "500"}}
+                        }
+                      }
+                    }
+                    """
+                )
+                command.getBoolean("autocommit").value shouldBe false
+                command.containsKey("writeConcern") shouldBe false
+                f.orders.countDocuments() shouldBe 1L
+                f.store.read("006-order-totals")!!.checkpoint(f.store.codecs) shouldBe checkpoint
+                f.stored("006-order-totals")!!.getString("state") shouldBe "RUNNING"
+            }
+        }
+
+        "a stale owner's checkpoint write matches nothing: LockLostException, and the page's writes roll back" {
+            Fixture().use { f ->
+                f.store.markRunning(totals, writer, startedAt)
+                f.store.markRunning(totals, takeover, startedAt)
+                val before = f.stored("006-order-totals")
+
+                val error = shouldThrow<LockLostException> {
+                    f.client.startSession().use { session ->
+                        session.withTransaction(
+                            {
+                                f.orders.insertOne(session, Document("_id", 1))
+                                f.store.writeCheckpoint(
+                                    "006-order-totals",
+                                    OWNER,
+                                    Checkpoint(BsonInt32(1), 1, emptyMap()),
+                                    session
+                                )
+                            },
+                            TRANSACTION_OPTIONS
+                        )
+                    }
+                }
+
+                error.id shouldBe "006-order-totals"
+                error.cause.shouldBeNull()
+                f.orders.countDocuments() shouldBe 0L
+                f.stored("006-order-totals") shouldBe before
             }
         }
 

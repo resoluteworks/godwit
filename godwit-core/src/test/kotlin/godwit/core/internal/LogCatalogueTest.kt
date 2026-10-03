@@ -11,6 +11,7 @@ import godwit.core.fixtures.LogCapture
 import godwit.core.fixtures.TestMongo
 import godwit.core.fixtures.keyValues
 import godwit.core.fixtures.line
+import godwit.core.fixtures.seeded
 import godwit.core.migration
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
@@ -270,6 +271,41 @@ class LogCatalogueTest : StringSpec() {
                     }
                     logs.events("Applied migration").map { it.keyValues.keys.drop(7) } shouldBe
                         listOf(listOf("made"), listOf("ordersPaid"))
+                }
+            }
+        }
+
+        "every event the runner emits for a batched migration has its catalogue level and keys" {
+            val catalogue = kdocCatalogue().associateBy { it.message }
+            GodwitFixture(appName = "catalogue-batches", config = seeded).use { f ->
+                f.collection("orders").insertMany((1..3).map { Document("_id", it) })
+                val totals = migration("006-order-totals").inBatches("orders", Document(), batchSize = 2) { orders ->
+                    count("ordersUpdated", orders.size)
+                }
+
+                LogCapture().use { logs ->
+                    f.godwit.migrate(totals)
+
+                    logs.events.map { it.message } shouldBe listOf(
+                        "Acquired migration lock",
+                        "Running migration",
+                        "Committed batch",
+                        "Committed batch",
+                        "Applied migration",
+                        "Migrations complete"
+                    )
+                    logs.events.forEach { event ->
+                        withClue(event.line) {
+                            val row = catalogue.getValue(event.message)
+                            event.level.toString() shouldBe row.level
+                            val keys = event.keyValues.keys.toList()
+                            keys.take(row.keys.size) shouldBe row.keys
+                            if (!row.counters) keys shouldBe row.keys
+                        }
+                    }
+                    logs.events("Applied migration").single().line shouldStartWith
+                        "Applied migration id=006-order-totals kind=ONCE steps=[IN_BATCHES] attempts=1 txRetries=0 " +
+                        "batches=2 durationMs="
                 }
             }
         }

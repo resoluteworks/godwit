@@ -563,9 +563,11 @@ A garbage collection pause of 90 s stops the process inside the body, the heartb
 another pod takes the lock and starts the same migration.
 
 godwit: the paused run's `checkLock()` before the commit throws `LockLostException`, which aborts its transaction. If
-it got past that check, the fenced APPLIED update matches nothing (the other pod's RUNNING record carries a different
-`owner`) and godwit aborts the transaction. Either way the paused run commits nothing and `migrate` throws
-`LockLostException`; the other pod runs the migration.
+it got past that check, its fenced APPLIED update meets the other pod's RUNNING record, which carries a different
+`owner`. That record committed after the paused transaction started, so the update conflicts with it (`WriteConflict`,
+112), the transaction aborts, and the driver runs the body again, whose first `checkLock()` throws. A transaction that
+started after the record reads the new `owner`, and its update matches nothing, which aborts it too. Either way the
+paused run commits nothing and `migrate` throws `LockLostException`; the other pod runs the migration.
 
 You: let the process restart, and look at what paused it. See [locking](locking.md).
 

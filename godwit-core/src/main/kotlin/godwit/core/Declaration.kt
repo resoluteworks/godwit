@@ -147,8 +147,8 @@ class MigrationDraft internal constructor(
      * For each page, in one transaction, godwit reads up to [batchSize] documents that match [pending] and have an
      * `_id` greater than the checkpoint, in `_id` order, calls [step] with them, and commits the step's writes
      * together with the new checkpoint (the page's last `_id`, the page count and the counts so far). The page that
-     * finds fewer than [batchSize] documents is the last: its transaction also commits the APPLIED history record.
-     * [step] is never called with an empty page.
+     * finds fewer than [batchSize] documents is the last: its transaction commits the APPLIED history record instead,
+     * which removes the checkpoint. [step] is never called with an empty page.
      *
      * After a failure, the next [Godwit.migrate] resumes after the checkpoint, so no page commits twice. [pending] is
      * evaluated on every page: a document that stops matching it is skipped.

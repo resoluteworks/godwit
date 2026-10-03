@@ -32,15 +32,6 @@ class PhaseStubsTest : StringSpec() {
             val ranFirst = migration("001-first").outsideTransaction { error("must not run") }
             val cases = listOf(
                 Triple(
-                    "P4",
-                    GodwitConfig(),
-                    listOf(
-                        ranFirst,
-                        migration("002-batched").inBatches("orders", Document()) {
-                        }
-                    )
-                ),
-                Triple(
                     "P5",
                     GodwitConfig(),
                     listOf(ranFirst, repeatable("reference-countries", "2026-10-01").outsideTransaction { })

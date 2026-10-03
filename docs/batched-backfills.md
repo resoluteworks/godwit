@@ -60,17 +60,22 @@ What godwit does when it runs it:
 3. Runs pages, one transaction each (snapshot read concern, majority write concern, primary reads):
    1. calls `checkLock()`;
    2. reads up to `batchSize` documents of `collection` that match `pending` and whose `_id` is greater than the
-      checkpoint, sorted by `_id` (the first page has no checkpoint);
-   3. when it found any, calls the step with them;
-   4. calls `checkLock()` and writes the checkpoint to the history document, fenced on this run's lock token: `lastId`
-      (the page's last `_id`), the page count and the counters so far;
-   5. when the page held fewer than `batchSize` documents, it is the last one: the same transaction records the
-      migration APPLIED and removes the checkpoint;
-   6. commits.
+      checkpoint, sorted by `_id` (the first page has no checkpoint), and checks that their `_id`s have one type
+      ([Edge cases](#_ids-of-more-than-one-bson-type));
+   3. when it read fewer than `batchSize`, this is the last page, and godwit first checks that no document matching
+      `pending` has an `_id` of another type. That check runs outside any transaction: the page's transaction commits
+      here without calling the step, the check runs, and the page runs again from 1 in a new transaction, which skips
+      this item;
+   4. when it found any, calls the step with them;
+   5. calls `checkLock()`;
+   6. when the page held `batchSize` documents, writes the checkpoint to the history document, fenced on this run's
+      lock token: `lastId` (the page's last `_id`), the page count and the counters so far; on the last page, records
+      the migration APPLIED instead, which removes the checkpoint;
+   7. commits.
 
 With 1,203 orders to total, the pages hold 500, 500 and 203 orders, and the third commits APPLIED. With exactly 1,000,
-two full pages are followed by a read that finds nothing; that transaction commits APPLIED without calling the step.
-The step is never called with an empty page.
+two full pages are followed by a read that finds nothing; it commits APPLIED without calling the step, and `batches` is
+2: a read that finds nothing is not a page. The step is never called with an empty page.
 
 Two properties make the loop end and keep it correct:
 
@@ -236,26 +241,34 @@ from a marketplace.
 
 godwit: paging compares `_id` with `$gt`, which matches values of the same BSON type only, so a run would silently skip
 every order of the other type. All numeric types (int, long, double, decimal) count as one type here, because `$gt`
-and the `_id` sort compare them with each other. godwit fails instead of skipping:
+and the `_id` sort compare them with each other, and so do strings and symbols. godwit fails instead of skipping:
 
 - The first page has no checkpoint and reads the lowest `_id`s in BSON order, where numbers sort before strings and
   strings before ObjectIds. The run's type is that of its checkpoint's `lastId` when it resumes, and the first page's
   otherwise. Every page's `_id`s must have that type.
 - Before the last page commits APPLIED, including a resumed run whose first page is empty, no document matching
-  `pending` may have an `_id` of another type.
+  `pending` may have an `_id` of another type. This check runs outside any transaction, before the step sees the last
+  page. It reads the documents of the other types that do not match `pending`, which can take long when they are many
+  and no index serves `pending`, but no transaction lifetime limits it; with `pending` narrowed to one `_id` type, it
+  reads nothing.
 
-Either check fails the migration with `MigrationFailedException` in `IN_BATCHES`, naming both types; the pages
-committed before it stay committed, and so does the checkpoint. Here pages 1 to 6 hold the 3,000 string orders and
-commit. The next page finds no string above the checkpoint, so it would be the last one; the second check finds the
-ObjectId orders and fails `006`, with a string as its checkpoint's `lastId`.
+Either check fails the migration with `MigrationFailedException` in `IN_BATCHES`, naming both types by their `$type`
+aliases (`number` for every numeric type, `string` for a symbol); the pages committed before it stay committed, and so
+does the checkpoint. Here pages 1 to 6 hold the 3,000 string orders and commit. The next page finds no string above the
+checkpoint, so it would be the last one; the second check finds the ObjectId orders and fails `006`, with a string as
+its checkpoint's `lastId`:
 
-You: give each type its own run, and narrow the failed migration to the type of its checkpoint. Read it with
-`history()` (`checkpoint.lastId`): here it is a string, so `006` keeps the strings and a new migration takes the
-ObjectIds. Narrowing `006` to ObjectIds instead would resume after the string checkpoint, find nothing (`$gt` on a
-string matches strings only) and record `006` APPLIED with no ObjectId order totalled. Either type is safe only while
-the migration has no checkpoint. Changing `006` is safe because it has not applied on this database (it failed); on
-every database where it applied it never runs again, and where it has not run yet the new migration totals the
-ObjectId orders that `006` now leaves out.
+```text
+ERROR godwit - Migration failed id=006-order-totals step=IN_BATCHES attempts=1 error=java.lang.IllegalStateException: The documents of orders that match pending have _ids of two types, string and objectId. inBatches pages by _id with $gt, which compares values of one BSON type (all numeric types count as one), so it would skip the documents of the other type. Select one _id type per migration with Filters.type("_id", ...) in pending; a migration that has a checkpoint keeps the type of its lastId.
+```
+
+You: give each type its own run, and narrow the failed migration to the type of its checkpoint. Read it with `history()`
+(`checkpoint.lastId`): here it is a string, so `006` keeps the strings and a new migration takes the ObjectIds.
+Narrowing `006` to ObjectIds instead would resume after the string checkpoint and find no string (`$gt` on a string
+matches strings only); the check before the last commit would then find the ObjectId orders and fail `006` again. A
+migration without a checkpoint can be narrowed to either type; one with a checkpoint keeps its checkpoint's. Changing
+`006` is safe because it has not applied on this database (it failed); on every database where it applied it never runs
+again, and where it has not run yet the new migration totals the ObjectId orders that `006` now leaves out.
 
 First move `006`'s page step into a `TransactionScope` extension in `006-order-totals.kt`, next to the private
 `totalOf` it calls, so the new migration reuses it:
@@ -378,8 +391,10 @@ The process is paused for longer than the lease after committing page 70.
 
 godwit: the `checkLock()` at the start of page 71, or before its commit, throws `LockLostException`, and that page's
 transaction aborts. If the paused run had passed that check when another process took over, its checkpoint write
-matches nothing, because the new holder's RUNNING record carries a different `owner`, and godwit aborts that
-transaction too. The new holder resumes after page 70.
+meets the new holder's RUNNING record, which carries a different `owner`. That record committed after the page's
+transaction started, so the write conflicts with it (`WriteConflict`, 112), the transaction aborts, and the driver runs
+the page again, whose first `checkLock()` throws. A page that starts after the record reads the new `owner`, and its
+fenced checkpoint write matches nothing, which aborts that transaction too. The new holder resumes after page 70.
 
 You: let the process restart. See [locking](locking.md).
 

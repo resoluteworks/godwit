@@ -4,8 +4,8 @@ import com.mongodb.MongoOperationTimeoutException
 import com.mongodb.client.model.Filters.eq
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates.inc
-import godwit.core.fixtures.CommandRecorder
 import godwit.core.fixtures.GodwitFixture
+import godwit.core.fixtures.HeldAcknowledgement
 import godwit.core.fixtures.LogCapture
 import godwit.core.fixtures.RecordedCommand
 import godwit.core.fixtures.TestMongo
@@ -51,29 +51,6 @@ private fun RecordedCommand.isAppliedRecord(): Boolean {
     if (name != "update" || command.getString("update").value != "godwit-history") return false
     val set = command.getArray("updates")[0].asDocument().getDocument("u").getDocument("\$set", null)
     return set?.getString("state", null)?.value == "APPLIED"
-}
-
-/**
- * Holds the reply of the first write [isTarget] picks before its majority acknowledgement, after the write applied,
- * until the client gives up on it: a commit or record that applies on the server and times out on a client with
- * `timeoutMS`. A later write [isTarget] picks runs as usual.
- */
-private class HeldAcknowledgement(private val isTarget: (RecordedCommand) -> Boolean) {
-    @Volatile
-    private var held: RecordedCommand? = null
-
-    @Volatile
-    private var hang: AutoCloseable? = null
-
-    val recorder = CommandRecorder(
-        onStarted = {
-            if (held == null && isTarget(it)) {
-                held = it
-                hang = TestMongo.failPoint("hangBeforeWaitingForWriteConcern", "alwaysOn")
-            }
-        },
-        onFailed = { if (it === held) hang?.close() }
-    )
 }
 
 class TransactionRetryTest : StringSpec() {

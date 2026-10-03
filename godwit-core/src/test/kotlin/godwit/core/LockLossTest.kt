@@ -10,6 +10,9 @@ import godwit.core.fixtures.GodwitFixture
 import godwit.core.fixtures.LogCapture
 import godwit.core.fixtures.RecordedCommand
 import godwit.core.fixtures.TestMongo
+import godwit.core.fixtures.awaitHeartbeatLoss
+import godwit.core.fixtures.awaitOrFail
+import godwit.core.fixtures.blockRenewals
 import godwit.core.fixtures.keyValues
 import godwit.core.fixtures.line
 import godwit.core.internal.testTimings
@@ -23,9 +26,6 @@ import io.kotest.matchers.string.shouldEndWith
 import io.kotest.matchers.string.shouldStartWith
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.kotest.matchers.types.shouldBeSameInstanceAs
-import org.awaitility.kotlin.atMost
-import org.awaitility.kotlin.await
-import org.awaitility.kotlin.until
 import org.bson.Document
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
@@ -40,14 +40,6 @@ import kotlin.time.TimeSource
 /** Short lock timings: the local deadline is 2 s after the last renewal was sent, the lease ends 1 s later. */
 private val shortLock = GodwitConfig(lock = testTimings.copy(waitTimeout = 1.minutes))
 
-/** Holds the renewals of the client named [appName] on the server for longer than the local deadline allows. */
-private fun blockRenewals(appName: String): AutoCloseable = TestMongo.failCommand(
-    appName,
-    listOf("update"),
-    "alwaysOn",
-    Document("blockConnection", true).append("blockTimeMS", 2500)
-)
-
 /** Waits until this run has lost the lock, checking it the way a step's loop does. */
 private fun StepScope.awaitLockLoss() {
     val deadline = TimeSource.Monotonic.markNow() + 20.seconds
@@ -55,14 +47,6 @@ private fun StepScope.awaitLockLoss() {
         check(!deadline.hasPassedNow()) { "the lock was not lost within 20 s" }
         Thread.sleep(20)
     }
-}
-
-/**
- * Waits until the heartbeat thread has logged the loss of the lock. A step that waits this way never calls
- * `checkLock()`, so only the runner's own checks can stop it.
- */
-private fun LogCapture.awaitHeartbeatLoss() {
-    await atMost 20.seconds until { events("Lost migration lock").isNotEmpty() }
 }
 
 private fun TransactionScope.probe() {
@@ -78,8 +62,6 @@ private fun RecordedCommand.recordsApplied(): Boolean {
     val set = command.getArray("updates")[0].asDocument().getDocument("u").getDocument("\$set", null)
     return set?.getString("state", null)?.value == "APPLIED"
 }
-
-private fun CountDownLatch.awaitOrFail() = check(await(30, TimeUnit.SECONDS)) { "timed out waiting for a signal" }
 
 /** How a run that lost the lock stops, and what it leaves in history. */
 class LockLossTest : StringSpec() {

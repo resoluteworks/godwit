@@ -439,7 +439,7 @@ In tests, the counts are the assertions (`outcome.count("ordersPaid") shouldBe 1
 | `steps` | The steps that ran; empty for a recorded migration |
 | `attempts` | Runs started since it was last applied, this one included: 1 unless earlier runs failed or were interrupted |
 | `transactionRetries` | Driver retries of transaction bodies in this call, over every transaction of the migration |
-| `batches` | Pages committed by an `inBatches` step, over every attempt; 0 for other migrations |
+| `batches` | Pages committed by an `inBatches` step, over every attempt; a last read that finds nothing is not a page. 0 for other migrations |
 | `counts`, `count(name)` | The counters, and one counter (0 when never set) |
 | `outOfOrder` | True when it ran under `OutOfOrder.RUN` behind an applied migration listed after it |
 | `duration` | This call's run of the migration |
@@ -541,7 +541,7 @@ fun printHistory(godwit: Godwit) {
 005-customer-external-ids APPLIED RAN attempts=2 counts={customersLinked=812}
 006-order-totals FAILED RAN attempts=1 counts={}
   last error in IN_BATCHES: java.lang.NullPointerException: Cannot invoke "java.lang.Long.longValue()" because the return value of "org.bson.Document.getLong(Object)" is null
-  40 batches committed, last _id 66fcf2a19b1e8a0012a1c0d4
+  40 batches committed, last _id BsonObjectId{value=66fcf2a19b1e8a0012a1c0d4}
 bootstrap-customers APPLIED RAN attempts=1 counts={customersCreated=0}
 reference-countries APPLIED RAN attempts=1 counts={countriesRemoved=0}
 ```
@@ -636,6 +636,7 @@ Every log line in these docs prints its values the same way:
 | Text, numbers | as they are, without quotes, spaces included | `holder=shop-7f9c4/1`, `durationMs=84` |
 | Lists | in brackets, comma-separated | `steps=[OUTSIDE_TRANSACTION, IN_TRANSACTION]`, `appliedAfter=[008-cart-currency]` |
 | Times | ISO-8601 instants with milliseconds | `expiresAt=2026-10-02T10:15:00.210Z` |
+| `lastId` on `Committed batch` | an ObjectId as its hex string, a string as it is, any other value as its relaxed Extended JSON, in which an int, a long or a finite double is the number and a decimal is a document | `lastId=66fcf2a19b1e8a0012a1c4bc`, `lastId=mkt-1042`, `lastId=10049`, `lastId={"$numberDecimal": "10049"}` |
 | `error` on `Migration failed` | the class and message of the exception the step threw | `error=java.net.http.HttpTimeoutException: request timed out` |
 | `error` on `Lock renewal failed` and `Lock release failed` | the class and message of the exception the lock operation threw | `error=com.mongodb.MongoOperationTimeoutException: Timed out while waiting for a server that matches WritableServerSelector...` |
 | `reason` on `Lost migration lock` | `NOT_OWNER` when a renewal matched no lock document with this run's owner token (another run holds the lock, or the document was deleted); `DEADLINE_PASSED` when no renewal succeeded within `lease - safetyMargin` of the last one, or of the acquire before the first | `reason=DEADLINE_PASSED` |

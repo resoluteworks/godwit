@@ -8,9 +8,13 @@ import com.mongodb.WriteError
 import com.mongodb.client.model.Indexes.ascending
 import godwit.core.fixtures.GodwitFixture
 import godwit.core.fixtures.TestMongo
+import godwit.core.fixtures.probe
+import godwit.core.fixtures.seeded
 import godwit.core.internal.DDL_GUIDANCE
 import godwit.core.internal.LIFETIME_GUIDANCE
 import godwit.core.internal.OTHER_CLIENT_GUIDANCE
+import godwit.core.internal.PAGE_LIFETIME_GUIDANCE
+import godwit.core.internal.PAGE_TOO_LARGE_GUIDANCE
 import godwit.core.internal.TOO_LARGE_GUIDANCE
 import godwit.core.internal.Tuning
 import godwit.core.internal.guidance
@@ -19,12 +23,14 @@ import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldEndWith
 import io.kotest.matchers.string.shouldStartWith
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.bson.BsonDocument
 import org.bson.Document
 import org.slf4j.LoggerFactory
+import java.io.File
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -62,18 +68,39 @@ class ErrorGuidanceTest : StringSpec() {
         "each recognised cause gets its guidance line, from the cause or from one of its own causes" {
             val long = 61.seconds
             val threshold = 60.seconds
-            guidance(serverError(251, "NoSuchTransaction"), long, threshold) shouldBe LIFETIME_GUIDANCE
-            guidance(serverError(290, "TransactionExceededLifetimeLimitSeconds"), 60.seconds, threshold) shouldBe
+            val step = StepKind.IN_TRANSACTION
+            guidance(serverError(251, "NoSuchTransaction"), step, long, threshold) shouldBe LIFETIME_GUIDANCE
+            guidance(serverError(290, "TransactionExceededLifetimeLimitSeconds"), step, 60.seconds, threshold) shouldBe
                 LIFETIME_GUIDANCE
-            guidance(serverError(388, "TransactionTooLargeForCache"), Duration.ZERO, threshold) shouldBe
+            guidance(serverError(388, "TransactionTooLargeForCache"), step, Duration.ZERO, threshold) shouldBe
                 TOO_LARGE_GUIDANCE
-            guidance(serverError(263, "OperationNotSupportedInTransaction"), Duration.ZERO, threshold) shouldBe
+            guidance(serverError(263, "OperationNotSupportedInTransaction"), step, Duration.ZERO, threshold) shouldBe
                 DDL_GUIDANCE
-            guidance(readConcernRefusal, Duration.ZERO, threshold) shouldBe DDL_GUIDANCE
+            guidance(readConcernRefusal, step, Duration.ZERO, threshold) shouldBe DDL_GUIDANCE
             val otherClient = IllegalStateException("state should be: ClientSession from same MongoClient")
-            guidance(otherClient, Duration.ZERO, threshold) shouldBe OTHER_CLIENT_GUIDANCE
+            guidance(otherClient, step, Duration.ZERO, threshold) shouldBe OTHER_CLIENT_GUIDANCE
             val wrapped = RuntimeException("the service failed", serverError(388, "TransactionTooLargeForCache"))
-            guidance(wrapped, Duration.ZERO, threshold) shouldBe TOO_LARGE_GUIDANCE
+            guidance(wrapped, step, Duration.ZERO, threshold) shouldBe TOO_LARGE_GUIDANCE
+        }
+
+        "an inBatches page past its lifetime or too large gets the page lines, which lower batchSize" {
+            val threshold = 60.seconds
+            val pages = StepKind.IN_BATCHES
+            guidance(serverError(251, "NoSuchTransaction"), pages, 61.seconds, threshold) shouldBe
+                PAGE_LIFETIME_GUIDANCE
+            guidance(serverError(290, "TransactionExceededLifetimeLimitSeconds"), pages, 60.seconds, threshold) shouldBe
+                PAGE_LIFETIME_GUIDANCE
+            guidance(serverError(251, "NoSuchTransaction"), pages, 59.seconds, threshold).shouldBeNull()
+            guidance(serverError(388, "TransactionTooLargeForCache"), pages, Duration.ZERO, threshold) shouldBe
+                PAGE_TOO_LARGE_GUIDANCE
+            guidance(serverError(263, "OperationNotSupportedInTransaction"), pages, Duration.ZERO, threshold) shouldBe
+                DDL_GUIDANCE
+            for (step in listOf(StepKind.OUTSIDE_TRANSACTION, StepKind.IN_TRANSACTION)) {
+                withClue(step) {
+                    guidance(serverError(388, "TransactionTooLargeForCache"), step, Duration.ZERO, threshold) shouldBe
+                        TOO_LARGE_GUIDANCE
+                }
+            }
         }
 
         "a cause godwit does not recognise gets no guidance" {
@@ -88,10 +115,12 @@ class ErrorGuidanceTest : StringSpec() {
                 IllegalArgumentException("ClientSession from same MongoClient") to Duration.ZERO
             )
             unrecognised.forEachIndexed { index, (error, longest) ->
-                withClue("case $index: $error") { guidance(error, longest, threshold).shouldBeNull() }
+                withClue("case $index: $error") {
+                    guidance(error, StepKind.IN_TRANSACTION, longest, threshold).shouldBeNull()
+                }
             }
             val writeError = MongoWriteException(WriteError(72, "invalid", BsonDocument()), ServerAddress(), emptySet())
-            guidance(writeError, Duration.ZERO, threshold).shouldBeNull()
+            guidance(writeError, StepKind.IN_TRANSACTION, Duration.ZERO, threshold).shouldBeNull()
         }
 
         "godwit looks eight causes deep for one it recognises" {
@@ -100,8 +129,8 @@ class ErrorGuidanceTest : StringSpec() {
                     RuntimeException("wrapper $n", cause)
                 }
 
-            guidance(wrapped(7), Duration.ZERO, 1.minutes) shouldBe TOO_LARGE_GUIDANCE
-            guidance(wrapped(8), Duration.ZERO, 1.minutes).shouldBeNull()
+            guidance(wrapped(7), StepKind.IN_TRANSACTION, Duration.ZERO, 1.minutes) shouldBe TOO_LARGE_GUIDANCE
+            guidance(wrapped(8), StepKind.IN_TRANSACTION, Duration.ZERO, 1.minutes).shouldBeNull()
         }
 
         "251 and 290 after an attempt at least as long as the lifetime threshold get the lifetime guidance" {
@@ -124,6 +153,44 @@ class ErrorGuidanceTest : StringSpec() {
                         failure.message shouldEndWith "\n$LIFETIME_GUIDANCE"
                     }
                 }
+            }
+        }
+
+        "a page past the lifetime threshold gets the page's guidance, timed on the failed page's own transaction" {
+            GodwitFixture(
+                appName = "guidance-page-lifetime",
+                config = seeded,
+                tuning = Tuning(lifetimeGuidanceAfter = 200.milliseconds)
+            ).use { f ->
+                f.collection("orders").insertMany((1..5).map { Document("_id", it) })
+                var failing: AutoCloseable? = null
+                // The second page outlasts the threshold, then its first write fails with 251: the first page's
+                // transaction was short, so only the second page's can earn the guidance.
+                val totals = migration("006-order-totals").inBatches("orders", Document(), batchSize = 2) { page ->
+                    if (page.first()["_id"] == 3) {
+                        Thread.sleep(250)
+                        failing = TestMongo.failCommand(
+                            f.appName,
+                            listOf("update"),
+                            Document("times", 1),
+                            Document("errorCode", 251)
+                                .append("errorLabels", emptyList<String>())
+                                .append("namespace", "${f.db.name}.orders")
+                        )
+                    }
+                    probe("orders", page)
+                }
+
+                val failure = try {
+                    shouldThrow<MigrationFailedException> { f.godwit.migrate(totals) }
+                } finally {
+                    failing?.close()
+                }
+
+                failure.step shouldBe StepKind.IN_BATCHES
+                failure.cause.shouldBeInstanceOf<MongoCommandException>().code shouldBe 251
+                failure.message shouldEndWith "\n$PAGE_LIFETIME_GUIDANCE"
+                f.stored("006-order-totals")!!.get("checkpoint", Document::class.java).getInteger("batches") shouldBe 1
             }
         }
 
@@ -193,6 +260,26 @@ class ErrorGuidanceTest : StringSpec() {
                     failure.message shouldBe
                         "Migration bootstrap-customers-once failed in IN_TRANSACTION: state should " +
                         "be: ClientSession from same MongoClient\n$OTHER_CLIENT_GUIDANCE"
+                }
+            }
+        }
+
+        "the MigrationFailedException KDoc and architecture.md's Error guidance table quote every guidance line" {
+            val kdoc = File("src/main/kotlin/godwit/core/Exceptions.kt").readText()
+            val table = File("../docs/architecture.md").readText().substringAfter("\n## Error guidance")
+                .substringBefore("\n## ")
+            val lines = listOf(
+                LIFETIME_GUIDANCE,
+                TOO_LARGE_GUIDANCE,
+                PAGE_LIFETIME_GUIDANCE,
+                PAGE_TOO_LARGE_GUIDANCE,
+                DDL_GUIDANCE,
+                OTHER_CLIENT_GUIDANCE
+            )
+            for (line in lines) {
+                withClue(line) {
+                    kdoc shouldContain " | `$line` |\n"
+                    table shouldContain " | `$line` |\n"
                 }
             }
         }

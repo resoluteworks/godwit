@@ -52,8 +52,8 @@ internal data class Tuning(
  * "Running one migration". Decisions come from the planner; this class carries them out with the history store, the
  * lock and the topology check, and runs the steps through the scopes and [Transaction].
  *
- * A plan that needs a later phase's machinery is refused under the lock, before anything runs or is recorded: an
- * `inBatches` step, a repeatable or every-start migration to run, the adoption hook to call, or a squash to record.
+ * A plan that needs a later phase's machinery is refused under the lock, before anything runs or is recorded: a
+ * repeatable or every-start migration to run, the adoption hook to call, or a squash to record.
  */
 internal class Runner(
     private val cluster: MongoCluster,
@@ -112,7 +112,7 @@ internal class Runner(
     }
 
     /** Every history document, sorted by id. */
-    fun history(): List<HistoryEntry> = store.readAll().map { it.toHistoryEntry() }
+    fun history(): List<HistoryEntry> = store.readAll().map { it.toHistoryEntry(store.codecs) }
 
     private fun readHistory(): List<HistoryRecord> = store.readAll().map { it.toHistoryRecord() }
 
@@ -179,14 +179,10 @@ internal class Runner(
         )
     }
 
-    /** Refuses a due migration whose kind or step a later phase implements. */
+    /** Refuses a due migration whose kind a later phase implements. */
     private fun requireImplemented(migration: Migration) {
         if (migration.kind != MigrationKind.Once) throw NotImplementedError("P5")
-        if (StepKind.IN_BATCHES in migration.steps) throw NotImplementedError("P4")
     }
-
-    /** What a migration's committed run left in history: its counters and its transaction's retries. */
-    private class Applied(val counts: Map<String, Long>, val transactionRetries: Int)
 
     /**
      * One run of one due migration, from its marker to its APPLIED record or its failure. [previous] is its history
@@ -215,8 +211,14 @@ internal class Runner(
         /** The outside step's counters, once it has returned. */
         private var outsideCounts: Map<String, Long> = emptyMap()
 
-        /** The transactional step's transaction, once it has started. */
+        /** The transactional step's transaction, once it has started; for an `inBatches` step, the current page's. */
         private var transaction: Transaction? = null
+
+        /** Where an `inBatches` step resumes: the checkpoint of the marker's document, null on a first run. */
+        private var checkpoint: Checkpoint? = null
+
+        /** The pages of an `inBatches` step, once they have started. */
+        private var pages: Pages? = null
 
         /** The outcome; null when the marker finds the migration APPLIED by another run, which reports it up to date. */
         fun run(): MigrationOutcome? {
@@ -227,6 +229,7 @@ internal class Runner(
                 // that run's document over; the check stops this run before any step.
                 lock.checkLock(id)
                 attempts = marker.getInteger("attempts")
+                checkpoint = marker.checkpoint(store.codecs)
                 if (previous?.state == HistoryState.RUNNING) Log.resumingInterruptedMigration(id, attempts)
                 if (due.outOfOrder) Log.runningOutOfOrderMigration(id, due.appliedAfter)
                 Log.runningMigration(id, migration.kind.stored, migration.steps, attempts)
@@ -238,7 +241,7 @@ internal class Runner(
                     migration.steps,
                     attempts,
                     applied.transactionRetries,
-                    0,
+                    applied.batches,
                     duration.inWholeMilliseconds,
                     applied.counts
                 )
@@ -249,7 +252,7 @@ internal class Runner(
                     migration.steps,
                     attempts,
                     applied.transactionRetries,
-                    0,
+                    applied.batches,
                     applied.counts,
                     due.outOfOrder,
                     duration
@@ -282,15 +285,31 @@ internal class Runner(
             return transactional(next, prepared, session)
         }
 
-        /**
-         * Runs the transactional step in one transaction whose last write is the fenced APPLIED record. Every run of
-         * the body gets a new scope and new counters, and the same [prepared] instance.
-         */
+        /** Runs the transactional step: one transaction for `inTransaction`, one per page for `inBatches`. */
         private fun <T> transactional(step: TransactionalStep<T>, prepared: T, session: ClientSession): Applied {
             this.step = step.kind
-            // An inBatches step never reaches this point: requireImplemented refuses it before anything runs.
-            val body = (step as InTransactionStep<T>).body
-            val transaction = Transaction(id, config.slowTransactionWarning, tuning).also { transaction = it }
+            return when (step) {
+                is InTransactionStep<T> -> inTransaction(step.body, prepared, session)
+
+                is InBatchesStep -> Pages(migration, step, database, store, lock, ::newTransaction, ::appliedRun)
+                    .also { pages = it }
+                    .run(session, checkpoint, outsideCounts)
+            }
+        }
+
+        /** A transaction of the transactional step, which a failure's guidance looks at once it is the latest. */
+        private fun newTransaction() = Transaction(id, config.slowTransactionWarning, tuning).also { transaction = it }
+
+        /**
+         * Runs an `inTransaction` step in one transaction whose last write is the fenced APPLIED record. Every run of
+         * the body gets a new scope and new counters, and the same [prepared] instance.
+         */
+        private fun <T> inTransaction(
+            body: TransactionScope.(prepared: T) -> Unit,
+            prepared: T,
+            session: ClientSession
+        ): Applied {
+            val transaction = newTransaction()
             val counts = transaction.run(session) { attempt ->
                 val context = StepContext { lock.checkLock(id) }
                 val scope = TransactionScope(id, database, session, attempt, context)
@@ -360,9 +379,10 @@ internal class Runner(
          * commit that applied although the driver threw. Any other error is recorded FAILED, fenced on this run's owner
          * and RUNNING; when that write matches nothing, the server has acknowledged the no-op once everything before it
          * is majority-committed, and the document decides: APPLIED by this run means the commit applied and only its
-         * reply failed, so the migration is applied; anything else means another run owns it. When the FAILED write
-         * throws, the document is left as the step left it (RUNNING, or APPLIED by a commit whose majority wait outlasts
-         * that write's timeout too), and [MigrationFailedException] carries the write's exception as suppressed.
+         * reply failed, so the migration is applied ([Pages.appliedDespiteError] for an `inBatches` step); anything
+         * else means another run owns it. When the FAILED write throws, the document is left as the step left it
+         * (RUNNING, or APPLIED by a commit whose majority wait outlasts that write's timeout too), and
+         * [MigrationFailedException] carries the write's exception as suppressed.
          */
         private fun failed(error: Throwable): Applied {
             if (error is LockLostException) {
@@ -394,7 +414,9 @@ internal class Runner(
                     throw read
                 }
                 document.appliedBy(lock.owner)?.let {
-                    return Applied(it.counts(), it.getInteger("transactionRetries", 0))
+                    val counts = it.counts()
+                    val retries = it.getInteger("transactionRetries", 0)
+                    return pages?.appliedDespiteError(counts, retries) ?: Applied(counts, retries)
                 }
                 Log.migrationFailed(id, step, attempts, error)
                 throw LockLostException(id, error)
@@ -408,7 +430,7 @@ internal class Runner(
             step,
             call.report(plan),
             error,
-            guidance(error, transaction?.longestAttempt ?: Duration.ZERO, tuning.lifetimeGuidanceAfter)
+            guidance(error, step, transaction?.longestAttempt ?: Duration.ZERO, tuning.lifetimeGuidanceAfter)
         )
 
         private fun appliedRun(counts: Map<String, Long>, transactionRetries: Int) = AppliedRun(
@@ -420,6 +442,12 @@ internal class Runner(
         )
     }
 }
+
+/**
+ * What a migration's committed run left in history: its counters, its transactions' retries, and for an `inBatches`
+ * step the pages committed over every attempt.
+ */
+internal class Applied(val counts: Map<String, Long>, val transactionRetries: Int, val batches: Int = 0)
 
 /** The document when it is APPLIED and the run whose lock token is [owner] wrote it; null otherwise. */
 private fun Document?.appliedBy(owner: String): Document? =

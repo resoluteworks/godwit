@@ -37,6 +37,14 @@ tasks.test {
     systemProperty("kotest.tags.exclude", "Atlas")
     dependsOn("lintKotlin")
     finalizedBy("jacocoTestReport")
+    // Some specs read the docs and the KDoc of the main sources, which they keep in step with the code (the log
+    // catalogue, the guidance lines). A change to either, a KDoc-only one included, runs the specs again.
+    inputs.dir(rootProject.layout.projectDirectory.dir("docs"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .withPropertyName("docs")
+    inputs.dir(layout.projectDirectory.dir("src/main/kotlin"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+        .withPropertyName("mainSources")
 }
 
 val atlasTest = tasks.register<Test>("atlasTest") {

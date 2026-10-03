@@ -1,6 +1,5 @@
 package godwit.core.internal
 
-import com.mongodb.MongoClientSettings
 import godwit.core.BatchCheckpoint
 import godwit.core.HistoryEntry
 import godwit.core.HistoryState
@@ -8,17 +7,18 @@ import godwit.core.LastError
 import godwit.core.MigrationKind
 import godwit.core.Origin
 import godwit.core.StepKind
-import org.bson.BsonDocument
 import org.bson.Document
+import org.bson.codecs.configuration.CodecRegistry
 import java.time.Instant
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * A history document as `history()` returns it. Fields that are absent read as null, an absent number as 0, an absent
- * list or `counts` as empty, an absent `outOfOrder` as false. A repeatable that has never applied has no stored
- * revision, so its kind carries an empty one.
+ * A history document that [codecs] decoded, as `history()` returns it. Fields that are absent read as null, an absent
+ * number as 0, an absent list or `counts` as empty, an absent `outOfOrder` as false. A repeatable that has never
+ * applied has no stored revision, so its kind carries an empty one. The checkpoint's `lastId` keeps its BSON type
+ * ([checkpoint]).
  */
-internal fun Document.toHistoryEntry(): HistoryEntry = HistoryEntry(
+internal fun Document.toHistoryEntry(codecs: CodecRegistry): HistoryEntry = HistoryEntry(
     id = getString("_id"),
     kind = when (StoredKind.valueOf(getString("kind"))) {
         StoredKind.ONCE -> MigrationKind.Once
@@ -36,7 +36,7 @@ internal fun Document.toHistoryEntry(): HistoryEntry = HistoryEntry(
     startedAt = instant("startedAt"),
     finishedAt = instant("finishedAt"),
     lastError = document("lastError")?.toLastError(),
-    checkpoint = document("checkpoint")?.toCheckpoint(),
+    checkpoint = checkpoint(codecs)?.let { BatchCheckpoint(it.lastId, it.batches) },
     runCount = numberOrNull("runCount")?.toLong(),
     lastRunAt = instant("lastRunAt"),
     supersedes = strings("supersedes"),
@@ -57,12 +57,6 @@ private fun Document.toLastError() = LastError(
     stack = getString("stack"),
     step = getString("step")?.let(StepKind::valueOf),
     at = getDate("at").toInstant()
-)
-
-/** `lastId` keeps its BSON type: the checkpoint document as BSON, through the driver's default codecs. */
-private fun Document.toCheckpoint() = BatchCheckpoint(
-    lastId = toBsonDocument(BsonDocument::class.java, MongoClientSettings.getDefaultCodecRegistry()).getValue("lastId"),
-    batches = number("batches").toInt()
 )
 
 private fun Document.document(key: String): Document? = get(key, Document::class.java)

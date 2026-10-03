@@ -1,5 +1,6 @@
 package godwit.core.internal
 
+import com.mongodb.MongoClientSettings
 import godwit.core.HistoryState
 import godwit.core.MigrationKind
 import godwit.core.Origin
@@ -16,6 +17,9 @@ import org.bson.types.ObjectId
 import java.time.Instant
 import java.util.Date
 import kotlin.time.Duration.Companion.milliseconds
+
+/** The codecs of a client without a UUID representation, which decoded the documents below. */
+private val codecs = MongoClientSettings.getDefaultCodecRegistry()
 
 private val startedAt = Instant.parse("2026-10-02T10:14:00.231Z")
 private val finishedAt = Instant.parse("2026-10-02T10:14:03.012Z")
@@ -55,7 +59,7 @@ private val full = Document("_id", "006-order-totals")
 class HistoryEntriesTest : StringSpec() {
     init {
         "a document with every field maps to a HistoryEntry field by field, the checkpoint's lastId keeping its type" {
-            val entry = full.toHistoryEntry()
+            val entry = full.toHistoryEntry(codecs)
 
             entry.id shouldBe "006-order-totals"
             entry.kind shouldBe MigrationKind.Once
@@ -90,7 +94,7 @@ class HistoryEntriesTest : StringSpec() {
 
         "absent fields read as null, 0, empty or false" {
             val entry = Document("_id", "003-file-store").append("kind", "ONCE").append("state", "APPLIED")
-                .append("origin", "ADOPTED").toHistoryEntry()
+                .append("origin", "ADOPTED").toHistoryEntry(codecs)
 
             entry.description.shouldBeNull()
             entry.steps.shouldBeEmpty()
@@ -119,7 +123,7 @@ class HistoryEntriesTest : StringSpec() {
             ).append("kind", "ONCE").append("state", "FAILED").append("origin", "RAN")
                 .append("lastError", Document("type", "java.lang.Error").append("at", Date.from(finishedAt)))
                 .append("checkpoint", Document("lastId", 41).append("batches", 1))
-                .toHistoryEntry()
+                .toHistoryEntry(codecs)
 
             val lastError = entry.lastError.shouldNotBeNull()
             lastError.message.shouldBeNull()
@@ -131,7 +135,7 @@ class HistoryEntriesTest : StringSpec() {
         "the kind carries a repeatable's stored revision, empty before a run applies it" {
             fun kind(kind: String, revision: String?) =
                 Document("_id", "x").append("kind", kind).append("state", "RUNNING").append("origin", "RAN")
-                    .apply { revision?.let { append("revision", it) } }.toHistoryEntry().kind
+                    .apply { revision?.let { append("revision", it) } }.toHistoryEntry(codecs).kind
 
             kind("REPEATABLE", "2026-10-01") shouldBe MigrationKind.Repeatable("2026-10-01")
             kind("REPEATABLE", null) shouldBe MigrationKind.Repeatable("")

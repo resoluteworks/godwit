@@ -397,9 +397,11 @@ and `RUNNING`): it matches only while no other process has taken the migration o
 
 A second guard covers the case where the check passes and the lock is lost an instant later, before the commit lands: the
 `APPLIED` record and every `inBatches` checkpoint are written inside the step's transaction with a filter on the owner
-token. Once another process has taken over the migration (its `RUNNING` marker carries its own token), that write
-matches nothing and the transaction aborts. A migration's transactional work therefore commits at most once, whatever
-the timing.
+token. Once another process has taken over the migration, its `RUNNING` marker carries its own token. A transaction
+that started after that marker reads the new token, its write matches nothing, and the transaction aborts. One that
+started before it conflicts with the marker on that write (`WriteConflict`, 112): the transaction aborts, the driver
+runs the body again, and the body's first `checkLock()` throws. A migration's transactional work therefore commits at
+most once, whatever the timing.
 
 ### Example: a network partition during 006
 

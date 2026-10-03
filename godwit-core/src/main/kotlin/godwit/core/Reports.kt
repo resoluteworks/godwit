@@ -42,7 +42,10 @@ class MigrationOutcome internal constructor(
     val attempts: Int,
     /** Driver retries of transaction bodies in this call, over every transaction of the migration. */
     val transactionRetries: Int,
-    /** Pages committed by an `inBatches` step, over every attempt; 0 for other migrations. */
+    /**
+     * Pages committed by an `inBatches` step, over every attempt; a last read that finds nothing is not a page. 0 for
+     * other migrations.
+     */
     val batches: Int,
     /** Every counter the steps set with `count`. */
     val counts: Map<String, Long>,

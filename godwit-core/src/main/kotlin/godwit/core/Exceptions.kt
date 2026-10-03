@@ -52,6 +52,8 @@ class UntrackedDatabaseException internal constructor(val collections: List<Stri
  * |---|---|
  * | Transaction past its lifetime | `The transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
  * | Transaction too large | `The transaction was too large for the storage engine's cache. Process the documents with inBatches, or move work that needs no atomicity to outsideTransaction.` |
+ * | An `inBatches` page past its lifetime | `The page's transaction ran past the server's transaction lifetime (transactionLifetimeLimitSeconds, 60 s by default). Lower batchSize, or, when few documents match pending, create an index that serves pending.` |
+ * | An `inBatches` page too large | `The page's transaction was too large for the storage engine's cache. Lower batchSize.` |
  * | DDL in a transaction | `DDL cannot run in a transaction: index builds on existing collections, drop, dropIndexes, renameCollection and collMod belong in outsideTransaction.` |
  * | Session from another client | `The step passed godwit's session to an operation on another MongoClient. Build Godwit and the services the migrations call from the same MongoClient.` |
  */
