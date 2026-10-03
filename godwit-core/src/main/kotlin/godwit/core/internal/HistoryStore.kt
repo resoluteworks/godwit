@@ -20,8 +20,15 @@ import java.util.Date
 /** The most of a stack trace that `lastError.stack` keeps, in UTF-8 bytes. */
 internal const val STACK_CAP_BYTES = 8 * 1024
 
-/** The markers' options: insert the document when it is missing, and return it as it is after the write. */
-private val UPSERT_AND_RETURN = FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER)
+/** The marker's options for [id]: insert the document when it is missing, and return it as it is after the write. */
+private fun upsertAndReturn(id: String) =
+    FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER).comment(godwitComment(id))
+
+/** The options of a write about the migration [id]. */
+private fun about(id: String) = UpdateOptions().comment(godwitComment(id))
+
+/** The options of an upsert about the migration [id]. */
+private fun upsertAbout(id: String) = about(id).upsert(true)
 
 /** The run that writes: its lock [owner] token, the process's [holder] and the call's [runId]. */
 internal data class Writer(val owner: String, val holder: String, val runId: String)
@@ -42,7 +49,8 @@ internal data class FailedRun(val error: Throwable, val step: StepKind?, val dur
 /**
  * The history collection: every read and write godwit makes to it, one document per migration with the migration id
  * as `_id`. The handle (from [Bookkeeping]) reads with majority read concern on the primary and writes with majority
- * write concern; the collection is created by its first upsert, and godwit creates no index on it.
+ * write concern; the collection is created by its first upsert, and godwit creates no index on it. Every command
+ * carries [godwitComment]: the migration id, or [HISTORY_SUBJECT] for the read of every document.
  *
  * Writes that change `state` carry the writing run's owner token. The writes of a run that holds the lock are fenced
  * on it (`{_id, owner, state: RUNNING}`), so a run that lost the lock and does not know it yet writes nothing over the
@@ -60,10 +68,20 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
      * documents, and a longer history would take a `getMore` as well; with the largest one, the first batch holds
      * every document up to the 16 MiB a reply can carry.
      */
-    fun readAll(): List<Document> = collection.find().sort(Sorts.ascending("_id")).batchSize(Int.MAX_VALUE).toList()
+    fun readAll(): List<Document> = collection.find().sort(Sorts.ascending("_id")).batchSize(Int.MAX_VALUE)
+        .comment(godwitComment(HISTORY_SUBJECT)).toList()
 
     /** The document of [id], or null. */
-    fun read(id: String): Document? = collection.find(Document("_id", id)).firstOrNull()
+    fun read(id: String): Document? = collection.find(Document("_id", id)).comment(godwitComment(id)).firstOrNull()
+
+    /**
+     * Reads the document of [id] on [session], as the first command of a transactional step's transaction: the driver
+     * sends it with `startTransaction: true`, before the step body runs. The document read is not used; the read
+     * exists so that the transaction opens with godwit's own command, which [godwitComment] marks.
+     */
+    fun openStepTransaction(id: String, session: ClientSession) {
+        collection.find(session, Document("_id", id)).comment(godwitComment(id)).firstOrNull()
+    }
 
     /**
      * Writes the RUNNING marker of [migration] for [writer], outside any transaction, and returns the document as it
@@ -102,11 +120,12 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
             } else {
                 set.append("description", description)
             }
+            val options = upsertAndReturn(migration.id)
             unlessApplied {
                 if (session == null) {
-                    collection.findOneAndUpdate(notApplied(migration.id), update, UPSERT_AND_RETURN)
+                    collection.findOneAndUpdate(notApplied(migration.id), update, options)
                 } else {
-                    collection.findOneAndUpdate(session, notApplied(migration.id), update, UPSERT_AND_RETURN)
+                    collection.findOneAndUpdate(session, notApplied(migration.id), update, options)
                 }
             }
         } else {
@@ -131,10 +150,11 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
                 .append("v", DOCUMENT_FORMAT)
                 .append("description", migration.description?.let(::literal) ?: "\$\$REMOVE")
             val pipeline = listOf(Document("\$set", set))
+            val options = upsertAndReturn(migration.id)
             if (session == null) {
-                collection.findOneAndUpdate(Document("_id", migration.id), pipeline, UPSERT_AND_RETURN)
+                collection.findOneAndUpdate(Document("_id", migration.id), pipeline, options)
             } else {
-                collection.findOneAndUpdate(session, Document("_id", migration.id), pipeline, UPSERT_AND_RETURN)
+                collection.findOneAndUpdate(session, Document("_id", migration.id), pipeline, options)
             }
         }
     }
@@ -168,9 +188,9 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
         if (migration.supersedes.isNotEmpty()) set.append("supersedes", migration.supersedes)
         val fence = ownedAndRunning(migration.id, owner)
         val result = if (session == null) {
-            collection.updateOne(fence, update)
+            collection.updateOne(fence, update, about(migration.id))
         } else {
-            collection.updateOne(session, fence, update)
+            collection.updateOne(session, fence, update, about(migration.id))
         }
         if (result.matchedCount == 0L) throw LockLostException(migration.id)
     }
@@ -188,7 +208,7 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
             .append("batches", checkpoint.batches)
             .append("counts", Document(checkpoint.counts))
         val update = Document("\$set", Document("checkpoint", stored))
-        val result = collection.updateOne(session, ownedAndRunning(id, owner), update)
+        val result = collection.updateOne(session, ownedAndRunning(id, owner), update, about(id))
         if (result.matchedCount == 0L) throw LockLostException(id)
     }
 
@@ -208,7 +228,7 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
             .append("durationMs", run.durationMs)
             .append("finishedAt", at)
             .append("lastError", error)
-        return collection.updateOne(ownedAndRunning(id, owner), Document("\$set", set)).matchedCount == 1L
+        return collection.updateOne(ownedAndRunning(id, owner), Document("\$set", set), about(id)).matchedCount == 1L
     }
 
     /**
@@ -239,11 +259,10 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
                 .append("steps", emptyList<String>())
                 .append("attempts", 0)
         )
-        val options = UpdateOptions().upsert(true)
         if (!transactions) {
             for (id in ids.asReversed()) {
                 checkLock()
-                if (collection.updateOne(Document("_id", id), insert, options).upsertedId != null) recorded(id)
+                if (collection.updateOne(Document("_id", id), insert, upsertAbout(id)).upsertedId != null) recorded(id)
             }
             return
         }
@@ -251,7 +270,7 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
             session.withTransaction(
                 {
                     val inserted = ids.filter { id ->
-                        collection.updateOne(session, Document("_id", id), insert, options).upsertedId != null
+                        collection.updateOne(session, Document("_id", id), insert, upsertAbout(id)).upsertedId != null
                     }
                     checkLock()
                     inserted
@@ -296,7 +315,7 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
                 "\$setOnInsert",
                 Document("kind", StoredKind.ONCE.name).append("steps", emptyList<String>()).append("attempts", 0)
             )
-        return unlessApplied { collection.updateOne(notApplied(id), update, UpdateOptions().upsert(true)) } != null
+        return unlessApplied { collection.updateOne(notApplied(id), update, upsertAbout(id)) } != null
     }
 
     /**

@@ -1,7 +1,6 @@
 plugins {
     kotlin("jvm")
     id("jacoco")
-    id("com.github.nbaztec.coveralls-jacoco")
     id("org.jetbrains.dokka")
     id("org.jmailen.kotlinter")
 }

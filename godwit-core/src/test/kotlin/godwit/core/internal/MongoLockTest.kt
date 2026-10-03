@@ -471,6 +471,24 @@ class MongoLockTest : StringSpec() {
             }
         }
 
+        "every lock command carries the comment {godwit: lock}: acquire, renewal, release and the holder's read" {
+            TestMongo.database().use { db ->
+                val recorder = CommandRecorder()
+                val zero = testTimings.copy(waitTimeout = Duration.ZERO)
+                LockProcess(db, "lock-comment-a", recorder = recorder).use { a ->
+                    LockProcess(db, "lock-comment-b", zero, recorder).use { b ->
+                        val held = a.lock.acquire(RUN_A)
+                        a.lock.renew(held.owner) shouldBe true
+                        shouldThrow<LockTimeoutException> { b.lock.acquire(RUN_B) }
+                        held.release()
+
+                        recorder.commands.map { it.name }.toSet() shouldBe setOf("findAndModify", "update", "find")
+                        recorder.commands.map { it.command["comment"] }.toSet() shouldBe setOf(json("{godwit: 'lock'}"))
+                    }
+                }
+            }
+        }
+
         "Duration.ZERO fails at the first refusal and takes a free lock" {
             TestMongo.database().use { db ->
                 val recorder = CommandRecorder()

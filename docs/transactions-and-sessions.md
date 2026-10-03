@@ -43,7 +43,9 @@ What godwit does when it runs it:
 2. Runs the outside step, if the migration has one, and keeps the value it returns.
 3. Starts a transaction with the driver's `ClientSession.withTransaction`, on a session from the `MongoCluster` passed
    to `Godwit`: snapshot read concern, majority write concern, primary reads.
-4. Calls `checkLock()`, then the body, with a new `TransactionScope` (its `session`, its `attempt`, empty counters).
+4. Calls `checkLock()` and reads the migration's history document through the session, so the transaction's first
+   command is godwit's own (see "Catching a forgotten session in tests"), then runs the body with a new
+   `TransactionScope` (its `session`, its `attempt`, empty counters).
 5. Calls `checkLock()` again and sets the history document to APPLIED with the counters, through the same session.
    That update matches only a document that is still RUNNING with this run's `owner`; when it matches nothing, godwit
    aborts the transaction.
@@ -143,10 +145,14 @@ result to the transaction.
 
 A missing `session` compiles. `SessionEscapeDetector` in godwit-test catches it when a test runs the step. It is a
 driver `CommandListener`: while a transactional step runs on a thread, every command that thread sends must belong to
-the step's transaction, which means it carries the step's session id (`lsid`) and `autocommit: false`, as the driver
-sends every command that gets `session`. A command without a session, or with another session (a service that starts
-a session and a transaction of its own), makes the detector throw `SessionEscapeError` before the command is sent; the
-step fails, and the failure names the command and the collection.
+the step's transaction, which means it carries the step's session id (`lsid`), the transaction's number and
+`autocommit: false`, as the driver sends every command that gets `session`. godwit opens each of the step's
+transactions with its own read, tagged with the comment `{godwit: <migration id>}`, before the body runs, so the
+detector knows the transaction before the body's first command. A command without a session, or with another session
+(a service that starts a session and a transaction of its own), makes the detector throw `SessionEscapeError` before
+the command is sent; the step fails, and the failure names the command and the collection. godwit's own history and
+lock commands carry a `{godwit: ...}` comment too, and the detector never counts them as escapes
+([how it works](testing.md#sessionescapedetector)).
 
 `testGodwit()` installs the detector on the client it returns, so every test that runs a migration through godwit-test
 checks it:
@@ -616,13 +622,20 @@ from the database after `migrate` returns.
 ### A service starts its own transaction
 
 A service method the step calls runs `session.withTransaction { ... }` or `session.startTransaction()` on the session
-it was given.
+it was given, or ends godwit's transaction with `session.commitTransaction()` or `session.abortTransaction()`.
 
-godwit: the session already carries godwit's transaction, and the driver throws `IllegalStateException` ("Transaction
-already in progress"). The migration fails in `IN_TRANSACTION`.
+godwit: the session already carries godwit's transaction, so starting one makes the driver throw
+`IllegalStateException` ("Transaction already in progress"), and the migration fails in `IN_TRANSACTION`. A commit or
+abort ends godwit's transaction early: an abort rolls back the step's writes so far, and a commit makes them permanent
+apart from the history record. Before its `APPLIED` record, or an `inBatches` page's checkpoint, godwit checks that the
+session still runs the transaction it opened. It does not, so godwit throws `IllegalStateException` ("The step ended
+godwit's transaction on its session") and the migration fails in its transactional step and is recorded `FAILED`;
+the writes the commit made stay. A commit followed by `session.startTransaction()` fails the same way. In a test,
+`SessionEscapeDetector` reads the commit or abort as the end of the step's transaction and checks nothing after it;
+this failure is what the test sees.
 
 You: give services plain operations that take a session, as the shop's services do, and let the caller own the
-transaction. A service must never commit or abort a session it was given.
+transaction. A service must never commit, abort or start a transaction on a session it was given.
 
 ### A slow read feeds a small write
 

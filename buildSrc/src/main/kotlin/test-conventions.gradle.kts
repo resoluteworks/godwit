@@ -81,7 +81,3 @@ tasks.jacocoTestReport {
         html.required = true
     }
 }
-
-coverallsJacoco {
-    reportPath = layout.buildDirectory.file("reports/jacoco/test/jacocoTestReport.xml").get().asFile.path
-}

@@ -89,9 +89,9 @@ replica set locally and in CI, reports coverage, generates API docs and publishe
 | `settings.gradle.kts` | `rootProject.name = "godwit"`, `include("godwit-core", "godwit-test")`. `docs-snippets/` stays a build of its own (below) |
 | `gradle.properties` | every version, in `key = value` form so the Makefile can include it (below) |
 | `gradle/wrapper/*`, `gradlew`, `gradlew.bat` | Gradle 9.7.1, `validateDistributionUrl=true` |
-| `build.gradle.kts` | root: `base`, `org.jetbrains.dokka`, `com.gradleup.nmcp.aggregation`; `group = "works.resolute"`; Dokka output to `docs/dokka`; `dokka(project(...))` and `nmcpAggregation(project(...))` for both published modules; Central Portal credentials from `SONATYPE_PUBLISH_USERNAME` and `SONATYPE_PUBLISH_PASSWORD`, `publishingType = "AUTOMATIC"` |
+| `build.gradle.kts` | root: `base`, `jacoco`, `coveralls-jacoco`, `org.jetbrains.dokka`, `com.gradleup.nmcp.aggregation`; `group = "works.resolute"`; Dokka output to `docs/dokka`; `dokka(project(...))` and `nmcpAggregation(project(...))` for both published modules; Central Portal credentials from `SONATYPE_PUBLISH_USERNAME` and `SONATYPE_PUBLISH_PASSWORD`, `publishingType = "AUTOMATIC"`; `jacocoMergedReport`, one JaCoCo XML report over both modules' main classes and the execution data of their `test` and `atlasTest` tasks, which `coverallsJacoco` uploads once |
 | `buildSrc/build.gradle.kts` | `kotlin-dsl`; reads `kotlinVersion` from the root `gradle.properties`; plugin classpath: Kotlin Gradle plugin, `org.jacoco.core` 0.8.15, Dokka 2.2.0, `coveralls-jacoco` 1.2.20, nmcp 1.6.2 (both plugins), kotlinter 5.7.0, binary-compatibility-validator |
-| `buildSrc/src/main/kotlin/common-conventions.gradle.kts` | `kotlin("jvm")`, `jacoco`, `coveralls-jacoco`, Dokka, kotlinter; `jvmToolchain(21)`; `allWarningsAsErrors`; `withSourcesJar()`, `withJavadocJar()`; group and version from `godwitVersion`; no default dependencies (no `kotlin-reflect`, no serialization library, no logging backend) |
+| `buildSrc/src/main/kotlin/common-conventions.gradle.kts` | `kotlin("jvm")`, `jacoco`, Dokka, kotlinter; `jvmToolchain(21)`; `allWarningsAsErrors`; `withSourcesJar()`, `withJavadocJar()`; group and version from `godwitVersion`; no default dependencies (no `kotlin-reflect`, no serialization library, no logging backend) |
 | `buildSrc/src/main/kotlin/test-conventions.gradle.kts` | Kotest (JUnit 5 runner, assertions, property), MockK, Logback, Testcontainers and Awaitility as `testImplementation`; `useJUnitPlatform()`; `test` excludes the `Atlas` Kotest tag, `atlasTest` runs only it; `jacocoTestReport` (XML and HTML) after `test`; `test` depends on `lintKotlin` |
 | `buildSrc/src/main/kotlin/publish-conventions.gradle.kts` | `maven-publish`, `signing`, `com.gradleup.nmcp`; publication `mavenJava`; POM with name, the module's required `description`, Apache-2.0 license, SCM `resoluteworks/godwit`, developer; GPG signing on the maintainer's machine |
 | `godwit-core/build.gradle.kts` | the three convention plugins; `description`; `api("org.mongodb:mongodb-driver-kotlin-sync:$mongoDriverVersion")`, `implementation("org.slf4j:slf4j-api:$slf4jVersion")`; the `verifyRuntimeDependencies` task (below) wired into `check` |
@@ -152,7 +152,8 @@ test:
 	./gradlew clean test
 	./gradlew atlasTest
 	python3 scripts/coverage-gate.py
-	./gradlew coverallsJacoco
+	./gradlew -p docs-snippets test
+	./gradlew :coverallsJacoco
 
 check-docs:
 	scripts/check-docs.sh
@@ -192,11 +193,13 @@ jobs:
       - run: ./gradlew atlasTest
       - run: python3 scripts/coverage-gate.py
       - run: ./gradlew -p docs-snippets compileKotlin
+      - run: ./gradlew -p docs-snippets test
       - run: scripts/check-docs.sh
 ```
 
-`ubuntu-latest` has Docker, which Testcontainers needs. `check-docs.sh` builds offline, so the step before it resolves
-the `docs-snippets` build's dependencies into the Gradle cache. CI is the gate and uploads nothing: the Coveralls
+`ubuntu-latest` has Docker, which Testcontainers needs. `check-docs.sh` builds offline, so the steps before it resolve
+the `docs-snippets` build's dependencies into the Gradle cache; from P7 on, the second of them runs the docs' Kotest
+specs for real. CI is the gate and uploads nothing: the Coveralls
 report is uploaded by `make test`, which reads `COVERALLS_REPO_TOKEN` from `.env`.
 
 **Behaviours.**
@@ -627,32 +630,50 @@ holder=...`.
 `session` fails the test.
 
 **Files.** `godwit-test/src/main/kotlin/godwit/test/TestGodwit.kt`, `RunnerPath.kt`, `SessionEscapeDetector.kt`,
-`internal/SharedContainers.kt`; tests under `godwit-test/src/test/kotlin/godwit/test/`; in
-`docs-snippets/build.gradle.kts`, a `test` task that runs the Kotest specs its main source set compiles.
+`internal/SharedContainers.kt`; tests under `godwit-test/src/test/kotlin/godwit/test/`, on godwit-core's test fixtures
+(a `testFixtureClasses` variant of `godwit-core` with a capability of its own); in godwit-core, the read that opens
+each transaction of a transactional step (`HistoryStore.openStepTransaction`, and the page read's comment), the
+`{godwit: ...}` comment on every history and lock command (`godwitComment`), and the check that a step left its
+transaction open (`requireStepTransaction`); in `docs-snippets/build.gradle.kts`, a `test` task that runs the Kotest
+specs its main source set compiles.
 
 **Behaviours.** Per [testing](../testing.md):
 
 - `testGodwit(config, atlasSearch)`: one replica-set container per JVM (the Atlas local image when `atlasSearch`), each
   started at most once, stopped when the JVM exits; a database named by a random UUID per call; a client with
-  `SessionEscapeDetector` installed; a `Godwit` on that client.
+  `SessionEscapeDetector` installed; a `Godwit` on that client. Each call ends the step transaction the detector still
+  tracks on the calling thread, as a test starts there.
 - `forget(id)` deletes the history document; `rerun` forgets and runs a once-only id with `Target.Through(id)` and
   out-of-order allowed, or a repeatable with `Target.Latest`, with the guard and adoption off; `runIsolated` runs one
   migration with the guard and adoption off and other history ids ignored; `shouldHaveApplied` throws
   `AssertionError` unless the id is `APPLIED`.
+- godwit opens every transaction of a transactional step with its own read, before the body: the migration's history
+  document in `inTransaction`, the page in `inBatches`, each with the comment `{godwit: <migration id>}`. Every other
+  command to the history and lock collections carries `{godwit: <migration id>}`, `{godwit: "history"}` (the read of
+  every document) or `{godwit: "lock"}`.
+- Before its last write in a step's transaction (the `APPLIED` record, a page's checkpoint), godwit requires the
+  session to still run the transaction its read opened; a body that committed, aborted or replaced it fails the step
+  with `IllegalStateException`, recorded `FAILED`.
 - `SessionEscapeDetector`: records, per thread, the `lsid` and `txnNumber` of the command that opens godwit's
-  transaction (`startTransaction: true`); until a commit or abort for that `lsid`, a command on that thread with
-  another `lsid` or without `autocommit: false` throws `SessionEscapeError` from the listener, naming the command and
-  the collection; a commit or abort of another session does not end the window.
+  transaction (`startTransaction: true` with that comment); until a commit or abort for that `lsid`, a command on that
+  thread with another `lsid`, another `txnNumber` or without `autocommit: false` throws `SessionEscapeError` from the
+  listener, naming the command and the collection; a commit or abort of another session does not end the window, and
+  an abort of another session passes, so that it cannot hide the escape that caused it. A `{godwit: ...}` command
+  outside the window's transaction is godwit's own, sent once the step's transaction is over: it passes and ends the
+  window, and opens the next one when it starts a transaction.
 
 **Tests.**
 
 | Spec | Covers |
 |---|---|
 | `TestGodwitTest` | two calls share one container and get different databases; `atlasSearch` starts the second image once |
+| `SharedContainersTest` | concurrent first reads start one container, share one client and log one `godwit-test container started` line (`image`, `startupMs`); a start that fails every attempt propagates and the next read starts again; the container is gone once a child JVM that started it exits |
 | `RunnerPathTest` | `forget`, `rerun` (counts 0 on the second run, also after `runIsolated` on a database with other collections), `runIsolated` on a database with unrelated data, `shouldHaveApplied` passing and failing |
-| `SessionEscapeDetectorTest` | an escape matrix: `find`, `insert`, `update`, `delete`, `aggregate` and `bulkWrite` without the session, in `inTransaction` and in `inBatches`, called directly and through a service, and a service that starts a session and a transaction of its own; each fails with `MigrationFailedException` whose cause is `SessionEscapeError` naming the command and collection, and an escape after the service's own commit is still caught. No false positive: the same calls with the session, commands on another thread, outside steps, godwit's own marker, record and checkpoint writes |
+| `SessionEscapeDetectorTest` | an escape matrix: `find`, `insert`, `update`, `delete`, `aggregate` and `bulkWrite` without the session, in `inTransaction` and in `inBatches`, called directly and through a service, and a service that starts a session and a transaction of its own; each fails with `MigrationFailedException` whose cause is `SessionEscapeError` naming the command and collection, and an escape after the service's own commit is still caught; a service that commits or aborts the session it was given fails the step with `IllegalStateException`. No false positive: the same calls with the session, commands on another thread, outside steps, godwit's own marker, record and checkpoint writes. After a step interrupted before its abort reached the listener, godwit's next command on the thread, and the next `testGodwit()` call, end the stale window |
 | `DriverContractTest` | pins what the detector relies on: commands sent with the transaction's session carry its `lsid` and `autocommit: false` in `CommandStartedEvent`, the first one also `startTransaction: true`, and an `Error` thrown from a listener reaches the caller |
-| `ExampleShopTest` | the shop's canonical spec from the docs, run for real (`docs-snippets` tests) |
+| `TransactionOpeningTest` (godwit-core) | the first command of every transaction of an `inTransaction` step, retries included, is godwit's read of the history document, and that of every page of an `inBatches` step its page read, each with the comment `{godwit: <id>}`; every command a call sends to the history and lock collections carries `{godwit: ...}` (with `HistoryStoreTest` and `MongoLockTest`, which pin each command's subject) |
+| `StepSessionTest` (godwit-core) | a step that aborts, commits, or commits and restarts godwit's transaction fails in `IN_TRANSACTION` or `IN_BATCHES` with `IllegalStateException`, recorded `FAILED`, with no checkpoint |
+| `ExampleShopTest` | the shop's canonical spec from the docs (`ShopMigrationsTest`), run for real with every other spec the docs show (`./gradlew -p docs-snippets test`) |
 
 **Gate.**
 
@@ -664,7 +685,8 @@ holder=...`.
 python3 scripts/coverage-gate.py
 ```
 
-**Measurable outcome.** The detector fails every case of the escape matrix and none of the controls (the test prints
+**Measurable outcome.** Every case of the escape matrix fails its step, through the detector or, for a service that
+ends the session's transaction, through godwit's own check, and none of the controls does (the test prints
 `escape matrix caught=<n>/<n> falsePositives=0`). Trace: `godwit-test container started image=... startupMs=...`
 appears once per test JVM.
 
@@ -731,7 +753,7 @@ GitHub Pages site serves the Dokka output.
 | 6 | Crash-window tests are timing-sensitive | Flaky CI hides real failures | kill points marked by command listeners, not sleeps; short lock timings through `LockConfig`; Awaitility with explicit timeouts | a test that fails then passes on rerun is treated as a bug |
 | 7 | Driver 5.7.0 retries a transaction body without backoff (backoff exists from 5.12) | Write conflicts with heavy application traffic, or with a dead holder's open transaction after a takeover, retry in a tight loop | godwit's body wrapper pauses between attempts and rate-limits the `Retrying transaction` WARN (P3); `transactionRetries` makes retries visible; batch sizes are the lever | `txRetries` in the `Applied migration` line |
 | 8 | CI tests one server release (`mongoImage`) while the docs state MongoDB 4.4 or later | An older server behaves differently | before the release, run `./gradlew test -PmongoImage=mongo:4.4` once; the README states the lowest version that passes | that run's exit code |
-| 9 | The Atlas local image is large and slow to start | Slow or flaky CI | only `Atlas`-tagged specs use it, in their own `atlasTest` task and CI step | `atlasTest` duration |
+| 9 | The Atlas local image is large and slow to start | Slow or flaky CI | two CI steps use it: the `Atlas`-tagged specs in their own `atlasTest` task, and `./gradlew -p docs-snippets test`, which starts two Atlas local containers (`testGodwit(atlasSearch = true)` for the shop's specs, and the `OwnCluster` build service for `OwnClusterSpec` when `TEST_MONGO_URI` is not set) | `atlasTest` duration; the docs-snippets `test` step's duration |
 | 10 | Clock skew on the primary | A lease ends early or late | the lease uses `$$NOW` on one server; the safety margin absorbs small skew; the docs require NTP | `Lost migration lock ... reason=DEADLINE_PASSED` |
 | 11 | A migration value that is never listed compiles and never runs | A change silently missing from a release | the coverage convention test in [testing](../testing.md#every-migration-has-a-test) | that test fails when the list and the tests disagree |
 | 12 | Topology is checked before adoption | A standalone server with transactional migrations refuses even when adoption would cover them | documented as an edge case in [adopting an existing database](../adopting-an-existing-database.md#edge-cases) | `TransactionsUnsupportedException` on a first start |

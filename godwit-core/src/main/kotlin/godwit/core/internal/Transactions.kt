@@ -9,6 +9,27 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 
+/** The message of the [IllegalStateException] that fails a step which ended godwit's transaction on its session. */
+internal const val STEP_TRANSACTION_ENDED = "The step ended godwit's transaction on its session: a call in the step " +
+    "committed or aborted the session it was given, or started another transaction on it, so the step's writes and " +
+    "the history record cannot commit together. A service must never commit, abort or start a transaction on a " +
+    "session it is given."
+
+/** The number of the transaction [session] runs, which the driver advances when a transaction starts. */
+internal fun transactionNumber(session: ClientSession): Long = session.wrapped.serverSession.transactionNumber
+
+/**
+ * Throws [IllegalStateException] ([STEP_TRANSACTION_ENDED]) unless [session] still runs the transaction numbered
+ * [opened], the one godwit opened for the step. godwit calls it before its own last write in that transaction (the
+ * APPLIED record, or a page's checkpoint). A step that commits or aborts the session leaves no transaction: the driver
+ * would send that write on its own and then skip the commit, recording the migration APPLIED (or the page done) with
+ * the step's writes rolled back or committed apart from the record. One that commits and starts a transaction of its
+ * own leaves another number. Either way the step fails instead, and the migration is recorded FAILED.
+ */
+internal fun requireStepTransaction(session: ClientSession, opened: Long) {
+    check(session.hasActiveTransaction && transactionNumber(session) == opened) { STEP_TRANSACTION_ENDED }
+}
+
 /** The pause before the second run of a transaction body; each later one is half as long again. */
 private const val FIRST_PAUSE_MS = 5.0
 

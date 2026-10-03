@@ -32,6 +32,7 @@ resolved the dependencies of both builds (`./gradlew test`, then `./gradlew -p d
 |---|---|
 | `scripts/check-docs.sh` | Everything below, one after another, stopping at the first failure |
 | `(cd docs-snippets && ./gradlew --offline compileKotlin)` | godwit-core and godwit-test build from the root build, and the example shop and every snippet compile against them |
+| `./gradlew -p docs-snippets test` | Every Kotest spec the snippets hold runs for real, against the containers `testGodwit()` starts; `OwnClusterSpec` runs against `TEST_MONGO_URI`, or, when it is not set, an Atlas local container the build starts for the task and stops when the build ends. Needs Docker; not part of `check-docs.sh` |
 | `scripts/neg-check.sh` | Every `neg/` file meets its `// expect:` line: it compiles, or it fails with the stated message |
 | `scripts/check-snippets.sh` | Every `kotlin` block in `README.md` and `docs/**/*.md` appears, after whitespace normalisation, in a compiled file or (after `This does not compile:`) in `neg/` |
 | `scripts/check-links.sh` | Every relative link and `#anchor` in `README.md` and `docs/**/*.md` resolves |

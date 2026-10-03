@@ -192,8 +192,12 @@ run(m):
                                if attempt > 1: sleep(backoff(attempt))       5 ms x 1.5 per run, at most 500 ms, jitter
                                scope = TransactionScope(session, attempt)    counters start empty
                                lock.checkLock()
+                               historyStore.read(session, m)                 opens the transaction with godwit's own
+                                                                             command, comment {godwit: m.id}
                                body(scope, prepared)                         the same prepared instance every run
                                lock.checkLock()
+                               the session still runs the transaction the read opened, or IllegalStateException
+                                                                             (the body committed, aborted or replaced it)
                                historyStore.recordApplied(session, m, counts + scope.counts)   fenced: matches 0 -> LockLostException
                            }
           inBatches     -> pages(m, doc.checkpoint)
@@ -276,6 +280,23 @@ run(m):
   start resumes, or `APPLIED` when a commit applied although the driver threw and the majority was still behind when
   the `FAILED` write's own `timeoutMS` passed, which the next start finds applied. Other history and lock write
   failures propagate as the driver's exceptions ([failure-and-recovery.md](failure-and-recovery.md#history-write-fails)).
+- Every transaction of a transactional step opens with godwit's own command: in `inTransaction`, a read of the
+  migration's history document on the session; in `inBatches`, the page's read. Each carries the comment
+  `{godwit: <migration id>}`. The driver sends a transaction's first command with `startTransaction: true`, so that
+  command is always godwit's and never the body's. godwit-test's `SessionEscapeDetector` recognises a step's
+  transaction by it and checks every later command on the thread, the body's first included
+  ([testing](testing.md#sessionescapedetector)); the comment also names the migration in the server's logs and
+  profiler.
+- Every other command godwit sends to its history and lock collections carries the same kind of comment:
+  `{godwit: <migration id>}` for a command about one migration, `{godwit: "history"}` for the read of every history
+  document, and `{godwit: "lock"}` for the lock's commands. godwit sends them outside a step's transaction only once
+  that transaction is over, so the detector reads one as the end of the transaction it tracks.
+- godwit's last write in a step's transaction, the `APPLIED` record or a page's checkpoint, goes only into the
+  transaction its own read opened, while it is still open. A body that commits or aborts the session it was given, or
+  commits it and starts another transaction on it, leaves no such transaction: the driver would send the record on
+  its own and skip the commit, so the migration would be `APPLIED` with its writes rolled back, or committed apart
+  from the record. godwit throws `IllegalStateException` instead, and the migration is recorded `FAILED`
+  ([a service starts its own transaction](transactions-and-sessions.md#a-service-starts-its-own-transaction)).
 - `withTransaction` is the driver's: it re-runs the body on `TransientTransactionError` and retries the commit on
   `UnknownTransactionCommitResult`, for up to 120 s. godwit wraps the body to count attempts, pause before each attempt
   after the first (driver 5.7.0 has no backoff of its own), reset counters, time each attempt (`Slow transaction` above
@@ -321,8 +342,9 @@ or as a repeatable whose revision a repeatable's run has not applied
 ## Lock operations
 
 The lock collection handle uses majority write concern, majority read concern, primary reads, the driver's default
-codec registry and a 5 s client-side timeout on every operation. In `mongosh` form, with the defaults (`lease` 60 s), the
-history collection `godwit-history` and an owner token `5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f`:
+codec registry and a 5 s client-side timeout on every operation, and each operation carries the comment
+`{godwit: "lock"}`, left out below. In `mongosh` form, with the defaults (`lease` 60 s), the history collection
+`godwit-history` and an owner token `5b0f3c6e-2a41-4f7e-9d1c-0e8a7b6c5d4f`:
 
 **Acquire.** An upsert on the lock document's `_id`. Its pipeline takes the lock if it is expired, released or
 missing, and otherwise leaves the document as it is:
@@ -434,7 +456,8 @@ The lock document has only its `_id` index. There is no TTL index ([locking.md](
 
 The history collection handle uses majority write concern, majority read concern, primary reads and the driver's
 default codec registry. Documents are `org.bson.Document`. The collection is created by its first upsert; godwit creates
-no index on it.
+no index on it. Every command carries a comment, left out below: `{godwit: <migration id>}`, or `{godwit: "history"}`
+for the read of every document.
 
 **Read** (start of every call, again under the lock):
 
@@ -617,13 +640,14 @@ pages(m, checkpoint):                         checkpoint from the marker's retur
         attempt += 1 (attempts count per page); pause before attempts after the first; counters start empty
         lock.checkLock()
         filter = m.pending AND (_id after checkpoint.lastId, when there is a checkpoint)
-        page = find(session, filter).sort({_id: 1}).limit(m.batchSize)
+        page = find(session, filter).sort({_id: 1}).limit(m.batchSize)   comment {godwit: m.id}: opens the transaction
         pageType = idType ?: typeClass(page.first._id), when the page is not empty
         every _id in page has pageType, or fail naming both types
         if page.size < m.batchSize and pageType != null and not checked:
             Unchecked(pageType)                                       the last page: commits nothing, no step yet
         if page is not empty: m.step(scope, page)
         lock.checkLock()
+        the session still runs the transaction the page read opened, or IllegalStateException
         batches = checkpoint.batches + 1, or checkpoint.batches when the page is empty
         if page.size < m.batchSize:                                   the last page, also when it is empty
             recordApplied(session, m, checkpoint.counts + scope.counts + outside step counts)
@@ -764,7 +788,7 @@ runs on a standalone server; it sends `hello` only when adoption has ids to reco
 
 | Requirement | Why |
 |---|---|
-| MongoDB 4.4 or later | godwit's own operations need 4.2 (`$$NOW` and pipeline updates for the lock and the repeatable marker, transactions on sharded clusters). 4.4 lets a transactional step create a collection by inserting into it, which `reference-countries` does on a new database |
+| MongoDB 4.4 or later | godwit's own operations need 4.4: they carry a `comment`, which `update` and `findAndModify` accept from 4.4, and they use `$$NOW` and pipeline updates for the lock and the repeatable marker, and transactions on sharded clusters, from 4.2. 4.4 also lets a transactional step create a collection by inserting into it, which `reference-countries` does on a new database |
 | A replica set or a sharded cluster, for transactional steps | Transactions do not exist on a standalone server. A single-node replica set is enough |
 | Atlas, or the Atlas local image, for `ensureSearchIndex` | Search index commands exist only where Atlas Search runs |
 | `org.mongodb:mongodb-driver-kotlin-sync` 5.7.0 | godwit's API is in terms of the Kotlin sync driver's types (`MongoCluster`, `ClientSession`, `MongoDatabase`) |

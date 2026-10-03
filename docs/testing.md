@@ -27,12 +27,13 @@ tasks.test {
 
 | Member | What it is |
 |---|---|
-| `client` | A `MongoClient` on a MongoDB container that the whole test JVM shares. A `SessionEscapeDetector` is installed on it. |
+| `client` | A `MongoClient` on a MongoDB container that the whole test JVM shares. A `SessionEscapeDetector` is installed on it. Every call on the same image returns the same client, so a test must not close it. |
 | `databaseName` | A new database name, a random UUID, different on every call. |
 | `database` | `client.getDatabase(databaseName)`. |
 | `godwit` | `Godwit(client, databaseName, config)`, ready to migrate. |
 
-- The container is a single-node replica set, so transactions work. It starts on the first call and stops when the JVM exits.
+- The container is a single-node replica set, so transactions work. It starts on the first call and stops when the JVM exits. A container that misses its readiness wait on a loaded machine is replaced by a new one, for up to three attempts in all, and each failed attempt but the last logs `godwit-test container failed to start` at `WARN`.
+- The start logs one line at `INFO`, on the logger `godwit.test`: `godwit-test container started image=mongo:8.0.17 startupMs=4210`.
 - Every call returns an empty database, so tests never see each other's data, may run in parallel and need no cleanup.
 - `atlasSearch = true` starts the Atlas local image instead, which also serves Atlas Search indexes. It starts more slowly, and each image starts at most once per JVM. Any test that runs `001-initial-setup` needs it, because that migration creates a search index.
 - `config` is the `GodwitConfig` under test: pass `adoptApplied`, `outOfOrder` and the rest here (see [configuration.md](configuration.md)).
@@ -223,11 +224,11 @@ db.godwit.rerun(migrations, "004-order-status").count("ordersPaid") shouldBe 0L
 
 A once-only `id` runs with `Target.Through(id)` and out-of-order allowed, so migrations applied after it do not block it. A repeatable or every-start `id` runs with `Target.Latest`. The outside step runs again too, which is how a test shows that it is idempotent.
 
-Like `runIsolated`, `rerun` turns the untracked-database guard and adoption off, so it works on a database whose only history document is the one it forgets. `Target.Through(id)` also runs the migrations listed before `id` that are not applied; after `runIsolated(migration)`, pass a list that holds only that migration: `rerun(listOf(orderTotals), "006-order-totals")`.
+Like `runIsolated`, `rerun` turns the untracked-database guard and adoption off, so it works on a database whose only history document is the one it forgets. `Target.Through(id)` also runs the migrations listed before `id` that are not applied; after `runIsolated(migration)`, pass a list that holds only that migration: `rerun(listOf(orderTotals), "006-order-totals")`. `rerun` checks the list before it forgets anything: an invalid list throws `InvalidMigrationsException`, and an `id` the list does not hold throws `IllegalArgumentException`.
 
 ## One migration on its own
 
-`runIsolated(migration)` runs a single migration through the real runner, without its predecessors. The untracked-database guard and adoption are off for that call, and other history ids are ignored. Use it for a migration that does not need the schema of earlier ones, and for tests that should not pay for a search index.
+`runIsolated(migration)` runs a single migration through the real runner, without its predecessors. The untracked-database guard and adoption are off for that call, and other history ids are ignored: they count as unknown applied ids under `UnknownApplied.WARN`, whatever the configuration says, so they are logged and reported, never refused. Use it for a migration that does not need the schema of earlier ones, and for tests that should not pay for a search index. A migration that history already records as applied does not run, and `runIsolated` throws `AssertionError`; `forget` it first, or use `rerun`.
 
 ```kotlin
 class IsolatedMigrationSpec : StringSpec({
@@ -252,7 +253,7 @@ class IsolatedMigrationSpec : StringSpec({
 
 ## `forget`: run a migration again
 
-`forget(id)` deletes the history document of `id`, so the next `migrate` runs it again. It exists only in `godwit-test`: production code has no way to un-apply a migration.
+`forget(id)` deletes the history document of `id`, so the next `migrate` runs it again. It exists only in `godwit-test`: production code has no way to un-apply a migration. A missing document stays missing. Forgetting the only history document of a database that has collections leaves it untracked, so a plain `migrate` then refuses it under the default `UntrackedDatabase.REFUSE`; `rerun` turns the guard off.
 
 ```kotlin
 class ForgetSpec : StringSpec({
@@ -492,7 +493,7 @@ val productPriceRise = migration("014-product-price-rise")
     }
 ```
 
-How it works. The sync driver calls command listeners on the thread that runs the command. godwit opens the transaction with its own command before the step body runs, and the detector records that command's session id (`lsid`). Until a commit or abort of that session ends the transaction, every command on that thread must carry the same `lsid` and `autocommit: false`, which the driver adds to commands sent with the session. A command without a session, or with another session (a service that starts a session and a transaction of its own), makes the detector throw `SessionEscapeError` (an `AssertionError`) before the command is sent. The commit of a service's own transaction does not end the tracked one.
+How it works. The sync driver calls command listeners on the thread that runs the command. godwit opens each transaction of a step with its own command before the step body runs, a read tagged with the comment `{godwit: <migration id>}`, and the detector records that command's session id (`lsid`) and transaction number. Until a commit or abort of that session ends the transaction, every command on that thread must carry the same `lsid`, the same transaction number and `autocommit: false`, which the driver adds to commands sent with the session. A command without a session, or with another session (a service that starts a session and a transaction of its own), makes the detector throw `SessionEscapeError` (an `AssertionError`) before the command is sent. A commit or abort of a service's own transaction does not end the tracked one. The abort is let through: it only rolls back the service's own transaction, and failing it would replace the escape that made the service abort. godwit's own history and lock commands carry a `{godwit: ...}` comment too, and godwit sends them outside a step's transaction only once that transaction is over, so one of them ends the tracked transaction instead of failing as an escape. A transaction whose commit or abort never reached the listener (the thread was interrupted, or the abort found no server) therefore ends at godwit's next command on that thread, and `testGodwit()` ends it on its own thread as a test starts: a test that a timeout interrupted mid-step does not fail the tests that run after it on the same thread.
 
 ```text
 update on products ran without the step's session, outside the transaction. Pass `session` to the driver call or the service method.
@@ -504,6 +505,8 @@ What it does not cover:
 
 - Commands on other threads. A step that fans out to a thread pool is not checked.
 - Outside steps. They have no session and no transaction.
+- Transactions that godwit does not open, such as one a test runs around its own setup.
+- Commands after a service commits or aborts the session it was given. The detector reads that commit or abort as the end of the step's transaction. godwit then fails the step with `IllegalStateException` before its `APPLIED` record or checkpoint (see [a service starts its own transaction](transactions-and-sessions.md#a-service-starts-its-own-transaction)), so the test fails all the same.
 - Paths the tests do not run. A migration branch that no test reaches is not checked.
 
 `testGodwit()` installs the detector. A test that builds its own client installs it too:
@@ -601,7 +604,7 @@ Each case gives the state, what godwit does, and what you do.
 
 - **State:** the machine running the tests has no Docker daemon.
 - **godwit:** the first `testGodwit()` fails with the Testcontainers error, and so does every test that calls it. There is no fallback to a local `mongod`.
-- **You:** provide Docker in CI. Where that is impossible, point the tests at your own cluster with `clientWithEscapeDetector` and build `Godwit` yourself, as in `OwnClusterSpec`. That cluster must be a replica set, and your tests must clean up the databases they create.
+- **You:** provide Docker in CI. Where that is impossible, point the tests at your own cluster with `clientWithEscapeDetector` and build `Godwit` yourself, as in `OwnClusterSpec`. That cluster must be a replica set that serves Atlas Search when the tests run `001-initial-setup`, and your tests must clean up the databases they create.
 
 ### A service on another client
 
@@ -650,6 +653,12 @@ Each case gives the state, what godwit does, and what you do.
 - **State:** an `inTransaction` step uses a parallel stream and one of its threads calls `collection("orders").updateOne(filter, update)` without a session.
 - **godwit:** the detector checks only the thread that runs the step, so the call is not caught in a test. In production it runs outside the transaction.
 - **You:** do the work on the step's thread, and pass `session` to every call. Do not parallelise inside a transaction: a `ClientSession` is not thread-safe either.
+
+### A timeout interrupts a test mid-step
+
+- **State:** a test framework's timeout interrupts the thread while a transactional step runs, as JUnit's `@Timeout` does, and the same thread then runs the next test.
+- **godwit:** the step's next command and the driver's abort fail before they are sent, so the detector never sees the transaction end, and `migrate` throws `MigrationFailedException` caused by the driver's `MongoInterruptedException`. The next `testGodwit()` call on that thread ends the transaction the detector still tracks, and so does godwit's next command there, so the next test runs as if nothing had happened. The interrupted test's database stays as the interrupt left it; no other test uses it.
+- **You:** nothing. Find out why the step was slow.
 
 ### A client without the detector
 

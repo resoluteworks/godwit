@@ -37,6 +37,7 @@ import org.bson.BsonBoolean
 import org.bson.BsonDocument
 import org.bson.BsonInt32
 import org.bson.BsonInt64
+import org.bson.BsonValue
 import org.bson.Document
 import org.bson.codecs.StringCodec
 import org.bson.codecs.configuration.CodecConfigurationException
@@ -155,6 +156,45 @@ class HistoryStoreTest : StringSpec() {
                 )
                 f.store.read("b")!!.getString("state") shouldBe "APPLIED"
                 f.store.read("missing").shouldBeNull()
+            }
+        }
+
+        "every command carries the comment {godwit: <migration id>}, or {godwit: history} for the read of them all" {
+            Fixture().use { f ->
+                /** The comments of the commands [call] sends, the commit of a transaction left out. */
+                fun commented(call: () -> Unit): List<BsonValue?> {
+                    f.recorder.clear()
+                    call()
+                    return f.recorder.commands.filter { it.name != "commitTransaction" }.map { it.command["comment"] }
+                }
+
+                fun about(vararg subjects: String) = subjects.map { json("{godwit: '$it'}") }
+
+                commented { f.store.readAll() } shouldBe about("history")
+                commented { f.store.markRunning(orderStatus, writer, startedAt) } shouldBe about("004-order-status")
+                commented { f.store.read("004-order-status") } shouldBe about("004-order-status")
+                val failure = FailedRun(IllegalStateException("boom"), StepKind.IN_TRANSACTION, 12, finishedAt)
+                commented { f.store.markFailed("004-order-status", OWNER, failure) } shouldBe about("004-order-status")
+                commented { f.store.markRunning(countries, writer, startedAt) } shouldBe about("reference-countries")
+                commented { f.store.recordApplied(countries, OWNER, applied) } shouldBe about("reference-countries")
+                f.client.startSession().use { session ->
+                    commented {
+                        f.store.markRunning(totals, writer, startedAt, session)
+                        f.store.markRunning(bootstrap, writer, startedAt, session)
+                        session.withTransaction({
+                            f.store.openStepTransaction(totals.id, session)
+                            f.store.writeCheckpoint(totals.id, OWNER, Checkpoint(BsonInt32(4), 1, emptyMap()), session)
+                            f.store.recordApplied(totals, OWNER, applied, session)
+                        })
+                    } shouldBe about(totals.id, bootstrap.id, totals.id, totals.id, totals.id)
+                }
+                commented { f.store.adopt(listOf("001-a", "002-b"), transactions = true) } shouldBe
+                    about("001-a", "002-b")
+                commented { f.store.adopt(listOf("003-c", "005-e"), transactions = false) } shouldBe
+                    about("005-e", "003-c")
+                commented { f.store.recordSuperseded(baseline, writer, finishedAt) } shouldBe about("100-baseline")
+                commented { f.store.recordMarked("007-m", "applied by hand", writer, finishedAt) } shouldBe
+                    about("007-m")
             }
         }
 

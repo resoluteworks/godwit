@@ -2,6 +2,7 @@ package godwit.core.internal
 
 import com.mongodb.client.model.FindOneAndUpdateOptions
 import com.mongodb.client.model.ReturnDocument
+import com.mongodb.client.model.UpdateOptions
 import godwit.core.LockConfig
 import godwit.core.LockHolder
 import godwit.core.LockLostException
@@ -29,8 +30,9 @@ private val WAIT_LOG_INTERVAL = 10.seconds
  *
  * [acquire] polls until it holds the lock or [LockConfig.waitTimeout] passes; the [HeldLock] it returns renews the
  * lease from a [Heartbeat] thread, answers [HeldLock.checkLock] without I/O and releases the lock. Every operation has
- * the lock collection's 5 s client-side timeout; driver exceptions other than a duplicate key on the acquire, which
- * means "held", propagate unchanged, and [acquire] does not poll again after one.
+ * the lock collection's 5 s client-side timeout and carries [godwitComment] with [LOCK_SUBJECT]; driver exceptions
+ * other than a duplicate key on the acquire, which means "held", propagate unchanged, and [acquire] does not poll again
+ * after one.
  *
  * [timeSource], [sleep] and [random] are the monotonic clock, the pause between attempts and the jitter; a test
  * replaces them to wait in virtual time.
@@ -46,6 +48,10 @@ internal class MongoLock(
     private val collection = bookkeeping.lock
 
     private val lockId = bookkeeping.lockId
+
+    private val lockComment = godwitComment(LOCK_SUBJECT)
+
+    private fun lockOptions() = UpdateOptions().comment(lockComment)
 
     /**
      * Takes the lock for the call [runId], with a new owner token, and starts its heartbeat. While another run holds
@@ -106,7 +112,7 @@ internal class MongoLock(
             collection.findOneAndUpdate(
                 Document("_id", lockId),
                 listOf(replace),
-                FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER)
+                FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER).comment(lockComment)
             )
         }
         return after?.getString("owner") == owner
@@ -121,13 +127,13 @@ internal class MongoLock(
     internal fun renew(owner: String): Boolean {
         val lease = Document("refreshedAt", "\$\$NOW").append("expiresAt", expiresIn(config.lease))
         val held = owned(owner).append("releasedAt", Document("\$exists", false))
-        return collection.updateOne(held, listOf(Document("\$set", lease))).matchedCount == 1L
+        return collection.updateOne(held, listOf(Document("\$set", lease)), lockOptions()).matchedCount == 1L
     }
 
     /** Ends the lease of [owner] now. Changes nothing when another run owns the lock. */
     internal fun release(owner: String) {
         val ended = Document("expiresAt", "\$\$NOW").append("releasedAt", "\$\$NOW")
-        collection.updateOne(owned(owner), listOf(Document("\$set", ended)))
+        collection.updateOne(owned(owner), listOf(Document("\$set", ended)), lockOptions())
     }
 
     /**
@@ -143,7 +149,7 @@ internal class MongoLock(
             .append("acquiredAt", Document("\$type", "date"))
             .append("expiresAt", Document("\$type", "date"))
             .append("\$expr", live)
-        return collection.find(filter).firstOrNull()
+        return collection.find(filter).comment(lockComment).firstOrNull()
     }
 
     /** `{_id, owner}`: the fence of the release, and with `releasedAt` absent, of the renewal. */

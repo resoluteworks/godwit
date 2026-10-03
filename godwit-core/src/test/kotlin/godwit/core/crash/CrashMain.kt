@@ -139,7 +139,7 @@ class CrashListener(private val point: CrashPoint) : CommandListener {
             CrashPoint.AFTER_MARKER -> name == "findAndModify" && target == "godwit-history"
             CrashPoint.MID_OUTSIDE_STEP -> name == "create" && target == "crash-a"
             CrashPoint.AFTER_OUTSIDE_STEP -> false
-            CrashPoint.IN_TRANSACTION -> name == "update" && opensTransaction
+            CrashPoint.IN_TRANSACTION -> name == "update" && target == "probes" && openTransaction != null
             CrashPoint.AFTER_COMMIT -> name == "commitTransaction"
             CrashPoint.ADOPTION_IN_TRANSACTION -> name == "update" && target == "godwit-history" && opensTransaction
             CrashPoint.ADOPTION_COMMITTED -> name == "commitTransaction"

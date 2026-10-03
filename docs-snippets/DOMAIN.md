@@ -28,6 +28,8 @@ build (`includeBuild("..")` in `settings.gradle.kts`) and compiles the example a
 them. The example app sees godwit only through the public API, as a real app does.
 Libraries on the example app's classpath: godwit-core, godwit-test, the MongoDB Kotlin sync driver 5.7.0,
 slf4j-api 2.0.17, Kotest 6.2.5 (`kotest-runner-junit5`, `kotest-assertions-core`) and MockK 1.14.9.
+`./gradlew test` from `docs-snippets/` runs every Kotest spec of the main source set for real (Docker needed), with
+Logback 1.5.32 on the test runtime only, configured as `docs/configuration.md` shows.
 
 ## Docs snippets
 

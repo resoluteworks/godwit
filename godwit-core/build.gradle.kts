@@ -37,3 +37,22 @@ val verifyRuntimeDependencies = tasks.register<VerifyRuntimeDependencies>("verif
 tasks.check {
     dependsOn(verifyRuntimeDependencies)
 }
+
+// godwit-test's specs run on this module's test fixtures (the replica set with fail points, the crash harness,
+// LogCapture, CommandRecorder). This variant hands them a jar of the compiled test classes and resources. Its own
+// capability keeps it out of every request that does not ask for it by name, as godwit-test's test dependency does.
+val testFixturesJar = tasks.register<Jar>("testFixturesJar") {
+    archiveClassifier = "test-fixtures"
+    from(sourceSets.test.map { it.output })
+}
+
+configurations.consumable("testFixtureClasses") {
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.LIBRARY))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
+        attribute(Bundling.BUNDLING_ATTRIBUTE, objects.named(Bundling.EXTERNAL))
+    }
+    outgoing.capability("${project.group}:godwit-core-test-fixtures:${project.version}")
+    outgoing.artifact(testFixturesJar)
+}

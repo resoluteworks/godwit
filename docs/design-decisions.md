@@ -145,7 +145,8 @@ bypass it. An ambient session hides exactly what a reviewer needs to see.
 **Consequences.** A forgotten `session` compiles. The call then runs outside the transaction: it is not rolled back,
 and it can block on the transaction's own writes. The detector catches it only on code paths a test executes, and it
 relies on the driver marking in-transaction commands with the session's `lsid` and `autocommit: false`, which an
-integration test pins. The
+integration test pins, and on godwit opening each of a step's transactions with its own read, tagged with the comment
+`{godwit: <migration id>}`. The
 services a step calls must be built from the `MongoClient` passed to `Godwit`.
 
 **In depth.** [Transactions and sessions](transactions-and-sessions.md#an-explicit-session),

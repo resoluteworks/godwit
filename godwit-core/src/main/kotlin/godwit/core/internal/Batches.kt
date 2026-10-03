@@ -146,9 +146,10 @@ private class PageStart(
  * One run of an `inBatches` step: the pages of architecture.md's "Checkpoint writes". Each page is one transaction
  * ([Transaction], from [newTransaction]) on the run's session that, after `checkLock()`, reads up to `batchSize`
  * documents of the step's collection that match `pending` and whose `_id` is greater than the checkpoint's `lastId`,
- * in `_id` order; calls the step with them unless there are none; calls `checkLock()`; and writes the next checkpoint,
- * fenced on the run's owner token. The page with fewer than `batchSize` documents, an empty one included, is the last:
- * its transaction writes the APPLIED record instead, which removes the checkpoint.
+ * in `_id` order; calls the step with them unless there are none; calls `checkLock()`; requires the page's transaction
+ * to be the one its read opened, still open ([requireStepTransaction]); and writes the next checkpoint, fenced on the
+ * run's owner token. The page with fewer than `batchSize` documents, an empty one included, is the last: its
+ * transaction writes the APPLIED record instead, which removes the checkpoint.
  *
  * The loop's checkpoint and `_id` class advance only after `withTransaction` returns: the body only reads them, so a
  * body the driver runs again after a transient error on the commit reads the same page again instead of the next one.
@@ -259,6 +260,7 @@ internal class Pages(
         val context = StepContext { lock.checkLock(id) }
         lock.checkLock(id)
         val page = read(session, from)
+        val opened = transactionNumber(session)
         val type = pageType(page, start.runType)
         val last = page.size < step.batchSize
         if (last && type != null && !start.otherTypesChecked) return Unchecked(type)
@@ -266,6 +268,7 @@ internal class Pages(
             step.body(TransactionScope(id, database, session, attempt, context), page.map { it.decode(documents) })
         }
         lock.checkLock(id)
+        requireStepTransaction(session, opened)
         val committed = if (from == null) 0 else from.batches
         val batches = if (page.isEmpty()) committed else committed + 1
         val counts = addCounts(from?.counts.orEmpty(), context.counts)
@@ -279,10 +282,14 @@ internal class Pages(
         return Next(next, type)
     }
 
-    /** Up to `batchSize` documents that match `pending` with an `_id` greater than [after]'s `lastId`, by `_id`. */
+    /**
+     * Up to `batchSize` documents that match `pending` with an `_id` greater than [after]'s `lastId`, by `_id`. The read
+     * opens the page's transaction, so it carries [godwitComment] with the migration id.
+     */
     private fun read(session: ClientSession, after: Checkpoint?): List<RawBsonDocument> {
         val filter = if (after == null) pending else and(pending, idAbove(after.lastId))
-        return raw.find(session, filter).sort(BY_ID).limit(step.batchSize).batchSize(step.batchSize).toList()
+        return raw.find(session, filter).sort(BY_ID).limit(step.batchSize).batchSize(step.batchSize)
+            .comment(godwitComment(id)).toList()
     }
 
     /**

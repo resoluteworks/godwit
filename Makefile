@@ -6,7 +6,8 @@ test:
 	./gradlew clean test
 	./gradlew atlasTest
 	python3 scripts/coverage-gate.py
-	./gradlew coverallsJacoco
+	./gradlew -p docs-snippets test
+	./gradlew :coverallsJacoco
 
 check-docs:
 	scripts/check-docs.sh

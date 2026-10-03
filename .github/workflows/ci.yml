@@ -19,4 +19,5 @@ jobs:
       - run: ./gradlew atlasTest
       - run: python3 scripts/coverage-gate.py
       - run: ./gradlew -p docs-snippets compileKotlin
+      - run: ./gradlew -p docs-snippets test
       - run: scripts/check-docs.sh

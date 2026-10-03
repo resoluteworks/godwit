@@ -359,8 +359,10 @@ internal class Runner(
         private fun newTransaction() = Transaction(id, config.slowTransactionWarning, tuning).also { transaction = it }
 
         /**
-         * Runs an `inTransaction` step in one transaction whose last write is the fenced APPLIED record. Every run of
-         * the body gets a new scope and new counters, and the same [prepared] instance.
+         * Runs an `inTransaction` step in one transaction that godwit's own read opens
+         * ([HistoryStore.openStepTransaction]) and whose last write is the fenced APPLIED record, sent only while that
+         * transaction is still open ([requireStepTransaction]). Every run of the body gets a new scope and new
+         * counters, and the same [prepared] instance.
          */
         private fun <T> inTransaction(
             body: TransactionScope.(prepared: T) -> Unit,
@@ -372,8 +374,11 @@ internal class Runner(
                 val context = StepContext { lock.checkLock(id) }
                 val scope = TransactionScope(id, database, session, attempt, context)
                 lock.checkLock(id)
+                store.openStepTransaction(id, session)
+                val opened = transactionNumber(session)
                 scope.body(prepared)
                 lock.checkLock(id)
+                requireStepTransaction(session, opened)
                 val counts = addCounts(outsideCounts, context.counts)
                 store.recordApplied(migration, lock.owner, appliedRun(counts, attempt - 1), session)
                 counts

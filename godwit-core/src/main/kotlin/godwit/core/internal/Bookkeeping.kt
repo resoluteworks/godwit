@@ -12,6 +12,8 @@ import com.mongodb.kotlin.client.MongoCluster
 import com.mongodb.kotlin.client.MongoCollection
 import godwit.core.GodwitConfig
 import godwit.core.MigrationKind
+import org.bson.BsonDocument
+import org.bson.BsonString
 import org.bson.Document
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.seconds
@@ -64,6 +66,26 @@ internal class Bookkeeping(private val cluster: MongoCluster, databaseName: Stri
     /** A causally consistent session on the cluster the app passed to `Godwit`. The caller closes it. */
     fun startSession(): ClientSession = cluster.startSession()
 }
+
+/** The [godwitComment] subject of a read of the whole history collection. */
+internal const val HISTORY_SUBJECT = "history"
+
+/** The [godwitComment] subject of every command on the lock collection. */
+internal const val LOCK_SUBJECT = "lock"
+
+/**
+ * `{godwit: <subject>}`: the `comment` of every command godwit sends to its history and lock collections, and of the
+ * read that opens each transaction of a transactional step ([HistoryStore.openStepTransaction], the page read of
+ * [Pages]). The subject is the migration id for a command about one migration, [HISTORY_SUBJECT] for a read of the
+ * whole history and [LOCK_SUBJECT] for the lock's commands.
+ *
+ * godwit-test's `SessionEscapeDetector` reads it. A command with it that starts a transaction opens godwit's
+ * transaction, which the detector then checks every command on the thread against. One outside the transaction it
+ * tracks tells it that transaction has ended: godwit sends its own commands outside a step's transaction only once that
+ * transaction is over, so a window whose commit or abort the detector never saw (an interrupted thread, an abort that
+ * found no server) ends there instead of failing godwit's own command. The server's logs and profiler show it too.
+ */
+internal fun godwitComment(subject: String): BsonDocument = BsonDocument("godwit", BsonString(subject))
 
 /** The `kind` a migration of this kind stores in history. */
 internal val MigrationKind.stored: StoredKind
