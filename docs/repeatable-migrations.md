@@ -10,7 +10,7 @@ accounts, and state outside MongoDB that can drift between deploys.
 
 | | `repeatable(id, revision)` | `everyStart(id)` |
 |---|---|---|
-| Due when | Its history document is missing or not APPLIED, or its stored revision differs from `revision` | Always, on every `migrate` with `Target.Latest` |
+| Due when | Its history document is missing, not APPLIED or another kind's, or its stored revision differs from `revision` | Always, on every `migrate` with `Target.Latest` |
 | A start with nothing else due | Skips it: one history read, no lock (the fast path) | Takes the lock and runs it |
 | `status()` | Pending while due | Never pending |
 | Use for | Data the code versions by hand: reference data, lookup tables, configuration documents | State that can change without a deploy: users at an external identity provider, seed data that comes from each environment's configuration |
@@ -281,7 +281,11 @@ because the lock was never taken), then runs the November revision from this pag
 
 - A repeatable at its current revision is up to date: when nothing else is due, `migrate` reads history once and
   returns without the lock.
-- A due repeatable takes the lock like any due migration, once per new revision per database.
+- A due repeatable takes the lock like any due migration, and runs once per new revision per database. A process that
+  read history before another one applied the new revision waits for the lock, reads history again under it, finds the
+  revision applied and releases the lock without running it. The exception is a run that loses the lock between its
+  check and its marker: its marker can land after another run applied the revision and reopen it, and the next start
+  runs that revision once more ([architecture](architecture.md#edge-cases)).
 - An every-start migration is always due, so a list that contains one takes the lock and writes history on every
   start; such a list never takes the fast path.
 
@@ -422,8 +426,10 @@ A rollout starts six pods, each with `bootstrap-customers`.
 godwit: the lock serialises them. Each pod runs `bootstrap-customers` once, after the pod before it releases the lock;
 five of the six runs create nothing (`customersCreated=0`). A pod waits at most `LockConfig.waitTimeout` for the lock.
 
-You: keep every-start steps short; six slow runs in a row add up to the last pod's start time. With repeatables, only
-the first pod runs a new revision and the other five take the fast path once it has applied.
+You: keep every-start steps short; six slow runs in a row add up to the last pod's start time. In a list without an
+every-start migration, a new revision of a repeatable runs on the first pod alone. The pods that read history before it
+applied wait for the lock, find the revision applied when they read history again under it, and release the lock
+without running anything (`Migrations complete ... ran=0`); a pod that starts after it has applied takes the fast path.
 
 ### A worker that must not migrate
 
@@ -451,6 +457,22 @@ it and starts afterwards runs it again, because its document is missing. When `a
 other history document is `ADOPTED`, the deletion reopens adoption: the next start with work due calls the hook again.
 Renaming the id of a repeatable is the same as deleting one and adding another: the new id runs, the old one becomes
 unknown.
+
+### Changing a migration's kind
+
+`reference-countries` was declared with `everyStart`, and the next release declares it with
+`repeatable("reference-countries", revision = "2026-10-01")`, so that a start with nothing else due takes the fast path
+again. Later a rollback deploys the `everyStart` release for a while, and the `repeatable` release rolls forward.
+
+godwit: the history document belongs to the id, and each run writes its own `kind` into it. A repeatable is up to date
+only when a repeatable's run applied its revision: the document is APPLIED, has `kind: REPEATABLE` and the same
+`revision`. An every-start or once-only run that applies removes `revision`. So the first start of the `repeatable`
+release runs it, every start of the rolled-back release runs its every-start version, and the next start of the
+`repeatable` release runs it again at `2026-10-01`, with `attempts: 1`. The data follows whichever release started
+last, as it does across revisions. `runCount` counts the runs of both kinds. A once-only migration whose id has an
+APPLIED document of another kind counts as applied and does not run.
+
+You: nothing, between repeatable and every-start. A once-only migration that must run gets an id of its own.
 
 ### A blank revision
 

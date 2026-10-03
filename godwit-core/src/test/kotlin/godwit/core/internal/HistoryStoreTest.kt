@@ -415,7 +415,7 @@ class HistoryStoreTest : StringSpec() {
                         "state": "APPLIED", "counts": {"ordersPaid": {"$numberLong": "1200"}, "ordersPending": {"$numberLong": "37"}},
                         "transactionRetries": 0, "durationMs": {"$numberLong": "84"}, "finishedAt": $${date(finishedAt)}
                       },
-                      "$unset": {"lastError": "", "checkpoint": ""}
+                      "$unset": {"lastError": "", "checkpoint": "", "revision": ""}
                     }
                     """
                 )
@@ -451,6 +451,35 @@ class HistoryStoreTest : StringSpec() {
                 everyStart.getLong("runCount") shouldBe 1L
                 everyStart.getDate("lastRunAt") shouldBe Date.from(finishedAt)
                 everyStart shouldNotContainKey "revision"
+            }
+        }
+
+        "a once-only or every-start run that applies removes the revision a repeatable's run left on the document" {
+            Fixture().use { f ->
+                val everyStartCountries = everyStart("reference-countries").outsideTransaction { }
+                val onceOnlyCountries = migration("reference-countries").inTransaction { }
+                for (other in listOf(everyStartCountries, onceOnlyCountries)) {
+                    withClue(other.kind) {
+                        f.store.markRunning(countries, writer, startedAt)
+                        f.store.recordApplied(countries, OWNER, applied)
+                        f.stored("reference-countries")!!.getString("revision") shouldBe "2026-10-01"
+                        // A once-only marker matches only a document that is not APPLIED: the repeatable's run failed.
+                        f.store.markRunning(countries, writer, startedAt)
+                        val failed = Document("\$set", Document("state", "FAILED"))
+                        f.history.updateOne(eq("_id", "reference-countries"), failed)
+
+                        f.store.markRunning(other, writer, startedAt).shouldNotBeNull()
+                        f.stored("reference-countries")!!.getString("revision") shouldBe "2026-10-01"
+                        f.store.recordApplied(other, OWNER, applied)
+
+                        val stored = f.stored("reference-countries").shouldNotBeNull()
+                        stored.getString("kind") shouldBe other.kind.stored.name
+                        stored.getString("state") shouldBe "APPLIED"
+                        stored shouldNotContainKey "revision"
+                        f.update(f.sent("update")).getDocument("u").getDocument("\$unset").keys shouldBe
+                            setOf("lastError", "checkpoint", "revision")
+                    }
+                }
             }
         }
 

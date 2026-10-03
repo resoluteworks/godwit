@@ -83,6 +83,13 @@ private val storedRerunnable = listOf(Stored(null)) +
     listOf(HistoryState.RUNNING, HistoryState.FAILED).flatMap { listOf(Stored(it), Stored(it, revision = "r2")) } +
     listOf(null, "r1", "r2").map { Stored(HistoryState.APPLIED, revision = it) }
 
+/**
+ * Each history state paired with each stored kind: a document keeps its id when the migration changes kind, and holds
+ * the kind of the run that last wrote it.
+ */
+private fun List<Stored>.withEveryKind(): List<Pair<Stored, StoredKind>> =
+    flatMap { stored -> StoredKind.entries.map { stored to it } }
+
 private fun Stored.recordFor(id: String, kind: StoredKind): List<HistoryRecord> =
     state?.let { listOf(record(id, it, origin, kind, revision)) } ?: emptyList()
 
@@ -101,13 +108,14 @@ private fun Plan.outcomeOf(id: String): Outcome = when (id) {
 
 class PlannerTest : StringSpec() {
     init {
-        // The matrix: kind x history state x origin, each case checked under every target, policy and adopting value.
+        // The matrix: kind x stored kind x history state x origin, each case checked under every target, policy and
+        // adopting value.
         // The applied anchor listed first gives the targets a once-only id and keeps every case free of conflicts.
 
-        for (stored in storedOnce) {
-            "once-only, $stored: due unless APPLIED, whatever the origin; Before it leaves it pending" {
+        for ((stored, kind) in storedOnce.withEveryKind()) {
+            "once-only, $stored, kind $kind: due unless APPLIED, whatever origin and kind; Before leaves it pending" {
                 val subject = once("002-subject")
-                val history = applied(ANCHOR) + stored.recordFor(subject.id, StoredKind.ONCE)
+                val history = applied(ANCHOR) + stored.recordFor(subject.id, kind)
                 for (setting in settings(Target.Latest, Target.Through(subject.id), Target.Before(subject.id))) {
                     withClue(setting) {
                         val plan = setting.plan(listOf(anchor, subject), history)
@@ -126,15 +134,16 @@ class PlannerTest : StringSpec() {
             }
         }
 
-        for (stored in storedRerunnable) {
-            "repeatable at r2, $stored: due unless APPLIED at r2, under Target.Latest only" {
+        for ((stored, kind) in storedRerunnable.withEveryKind()) {
+            "repeatable at r2, $stored, kind $kind: due unless a repeatable APPLIED r2, under Target.Latest only" {
                 val subject = rep("reference-countries", revision = "r2")
-                val history = applied(ANCHOR) + stored.recordFor(subject.id, StoredKind.REPEATABLE)
+                val history = applied(ANCHOR) + stored.recordFor(subject.id, kind)
                 for (setting in settings(Target.Latest, Target.Before(ANCHOR), Target.Through(ANCHOR))) {
                     withClue(setting) {
                         val plan = setting.plan(listOf(anchor, subject), history)
+                        val atRevision = stored.state == HistoryState.APPLIED && stored.revision == "r2"
                         plan.outcomeOf(subject.id) shouldBe when {
-                            stored.state == HistoryState.APPLIED && stored.revision == "r2" -> Outcome.UP_TO_DATE
+                            atRevision && kind == StoredKind.REPEATABLE -> Outcome.UP_TO_DATE
                             setting.target == Target.Latest -> Outcome.DUE
                             else -> Outcome.NONE
                         }
@@ -145,9 +154,9 @@ class PlannerTest : StringSpec() {
                 }
             }
 
-            "every-start, $stored: due on every Target.Latest call, never pending in status, never under a target" {
+            "every-start, $stored, kind $kind: due on every Target.Latest call, never pending, never under a target" {
                 val subject = every("bootstrap-customers")
-                val history = applied(ANCHOR) + stored.recordFor(subject.id, StoredKind.EVERY_START)
+                val history = applied(ANCHOR) + stored.recordFor(subject.id, kind)
                 for (setting in settings(Target.Latest, Target.Before(ANCHOR), Target.Through(ANCHOR))) {
                     withClue(setting) {
                         val plan = setting.plan(listOf(anchor, subject), history)

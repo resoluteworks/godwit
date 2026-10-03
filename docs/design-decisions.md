@@ -307,9 +307,10 @@ so a checksum would rerun migrations after upgrades that changed nothing. Runnin
 production database run the repeatable against the same schema.
 
 **Consequences.** The application changes the revision in the same commit as the code. Revisions are compared for
-equality: an older release started after a newer one applies its own revision again. A repeatable or every-start
-migration deleted from the code leaves an `APPLIED` history document that reports as unknown applied; godwit has no
-API to remove it, and the documented procedure is to delete that document by hand
+equality: an older release started after a newer one applies its own revision again. A run that loses the lock can
+make a repeatable run once more at the same revision ([architecture](architecture.md#edge-cases)). A repeatable or
+every-start migration deleted from the code leaves an `APPLIED` history document that reports as unknown applied;
+godwit has no API to remove it, and the documented procedure is to delete that document by hand
 ([repeatable migrations](repeatable-migrations.md#deleting-a-repeatable-or-every-start-migration)).
 
 **In depth.** [Repeatable migrations](repeatable-migrations.md#design-decisions).

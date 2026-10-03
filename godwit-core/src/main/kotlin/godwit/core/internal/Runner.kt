@@ -10,7 +10,6 @@ import godwit.core.HistoryState
 import godwit.core.LockLostException
 import godwit.core.Migration
 import godwit.core.MigrationFailedException
-import godwit.core.MigrationKind
 import godwit.core.MigrationOutcome
 import godwit.core.MigrationReport
 import godwit.core.MigrationStatus
@@ -52,8 +51,14 @@ internal data class Tuning(
  * "Running one migration". Decisions come from the planner; this class carries them out with the history store, the
  * lock and the topology check, and runs the steps through the scopes and [Transaction].
  *
- * A plan that needs a later phase's machinery is refused under the lock, before anything runs or is recorded: a
- * repeatable or every-start migration to run, the adoption hook to call, or a squash to record.
+ * Every kind runs through the same [MigrationRun]: once-only migrations first, then repeatable and every-start ones,
+ * in the plan's order. Only the history writes differ by kind. The marker ([HistoryStore.markRunning]) of a repeatable
+ * or every-start migration takes an APPLIED document back to RUNNING, so it never reports one as applied by another
+ * run. The APPLIED record ([HistoryStore.recordApplied]) stores a repeatable's `revision` and removes it for every
+ * other kind, and stores `lastRunAt` and increments `runCount` for a repeatable or every-start migration.
+ *
+ * A plan that needs a later phase's machinery is refused under the lock, before anything runs or is recorded: the
+ * adoption hook to call, or a squash to record.
  */
 internal class Runner(
     private val cluster: MongoCluster,
@@ -147,7 +152,6 @@ internal class Runner(
             topology.requireTransactions(plan)
             untrackedRefusal(plan)?.let { throw it }
             if (plan.superseded.isNotEmpty()) throw NotImplementedError("P6")
-            plan.due.forEach { requireImplemented(it.migration) }
             upToDate += plan.upToDate
             val previous = history.associateBy { it.id }
             for (due in plan.due) {
@@ -177,11 +181,6 @@ internal class Runner(
             lock.lockWait,
             started.elapsedNow()
         )
-    }
-
-    /** Refuses a due migration whose kind a later phase implements. */
-    private fun requireImplemented(migration: Migration) {
-        if (migration.kind != MigrationKind.Once) throw NotImplementedError("P5")
     }
 
     /**
@@ -220,7 +219,10 @@ internal class Runner(
         /** The pages of an `inBatches` step, once they have started. */
         private var pages: Pages? = null
 
-        /** The outcome; null when the marker finds the migration APPLIED by another run, which reports it up to date. */
+        /**
+         * The outcome; null when a once-only migration's marker finds it APPLIED by another run, which reports it up
+         * to date. A repeatable or every-start migration's marker never does: it runs again.
+         */
         fun run(): MigrationOutcome? {
             lock.checkLock(id)
             return bookkeeping.startSession().use { session ->

@@ -400,8 +400,9 @@ A second guard covers the case where the check passes and the lock is lost an in
 token. Once another process has taken over the migration, its `RUNNING` marker carries its own token. A transaction
 that started after that marker reads the new token, its write matches nothing, and the transaction aborts. One that
 started before it conflicts with the marker on that write (`WriteConflict`, 112): the transaction aborts, the driver
-runs the body again, and the body's first `checkLock()` throws. A migration's transactional work therefore commits at
-most once, whatever the timing.
+runs the body again, and the body's first `checkLock()` throws. A once-only migration's transactional work therefore
+commits at most once, whatever the timing. A repeatable or every-start migration's marker is unconditional, so a run
+that lost the lock can still make it run once more ([architecture](architecture.md#edge-cases)).
 
 ### Example: a network partition during 006
 

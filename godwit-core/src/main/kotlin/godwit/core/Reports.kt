@@ -67,7 +67,10 @@ class MigrationReport internal constructor(
     val recorded: List<MigrationOutcome>,
     /** Ids found already applied, and repeatables found at their current revision. */
     val upToDate: List<String>,
-    /** Ids still due because the [Target] stopped before them. Empty under [Target.Latest]. */
+    /**
+     * Once-only ids still due because the [Target] stopped before them. A target never runs repeatable or every-start
+     * migrations, and they are not listed here. Empty under [Target.Latest].
+     */
     val pending: List<String>,
     /** APPLIED history ids that the list does not know (see [UnknownApplied]). */
     val unknownApplied: List<String>,

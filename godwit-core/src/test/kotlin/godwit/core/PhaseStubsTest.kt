@@ -6,7 +6,6 @@ import com.mongodb.kotlin.client.MongoDatabase
 import godwit.core.fixtures.GodwitFixture
 import godwit.core.internal.StepContext
 import io.kotest.assertions.throwables.shouldThrow
-import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.mockk
@@ -27,43 +26,21 @@ class PhaseStubsTest : StringSpec() {
                 "P6"
         }
 
-        "a plan that needs a later phase is refused under the lock, before anything runs or is recorded" {
+        "an adoption hook to call is refused under the lock, before anything runs or is recorded" {
             val hookCalls = mutableListOf<String>()
-            val ranFirst = migration("001-first").outsideTransaction { error("must not run") }
-            val cases = listOf(
-                Triple(
-                    "P5",
-                    GodwitConfig(),
-                    listOf(ranFirst, repeatable("reference-countries", "2026-10-01").outsideTransaction { })
-                ),
-                Triple(
-                    "P5",
-                    GodwitConfig(),
-                    listOf(
-                        ranFirst,
-                        everyStart("bootstrap-customers").outsideTransaction {
-                        }
-                    )
-                ),
-                Triple(
-                    "P6",
-                    GodwitConfig(
-                        adoptApplied = { database ->
-                            hookCalls += database.name
-                            emptySet()
-                        }
-                    ),
-                    listOf(ranFirst)
-                )
-            )
-            cases.forEachIndexed { index, (phase, config, migrations) ->
-                withClue("case $index") {
-                    GodwitFixture(config = config).use { f ->
-                        shouldThrow<NotImplementedError> { f.godwit.migrate(migrations) }.message shouldBe phase
-                        f.history.countDocuments() shouldBe 0L
-                        f.collection("godwit-lock").find().first().containsKey("releasedAt") shouldBe true
-                    }
+            val config = GodwitConfig(
+                adoptApplied = { database ->
+                    hookCalls += database.name
+                    emptySet()
                 }
+            )
+            GodwitFixture(config = config).use { f ->
+                val first = migration("001-first").outsideTransaction { error("must not run") }
+
+                shouldThrow<NotImplementedError> { f.godwit.migrate(first) }.message shouldBe "P6"
+
+                f.history.countDocuments() shouldBe 0L
+                f.collection("godwit-lock").find().first().containsKey("releasedAt") shouldBe true
             }
             hookCalls shouldBe emptyList()
         }

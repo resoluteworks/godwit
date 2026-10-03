@@ -21,9 +21,10 @@ internal fun adoptionCanRun(config: GodwitConfig, history: List<HistoryRecord>):
  * Decides what a call does, from data alone: the validated list [migrations], every [history] document, the [target]
  * (rule 9 already checked) and the policies in [config].
  *
- * - Due: a once-only migration whose document is missing or not APPLIED; a repeatable whose document is missing, not
- *   APPLIED or at another revision; an every-start migration always. Once-only migrations run in list order, then
- *   repeatable and every-start ones in list order.
+ * - Due: a once-only migration whose document is missing or not APPLIED, whatever kind wrote it; a repeatable whose
+ *   document is missing, not APPLIED, at another revision or written by a run of another kind (the id changed kind);
+ *   an every-start migration always. Once-only migrations run in list order, then repeatable and every-start ones in
+ *   list order.
  * - [Target.Before] and [Target.Through] reach the once-only migrations up to their id; what they stop before is
  *   pending, and no repeatable or every-start migration runs.
  * - A superseding migration that is not APPLIED is recorded when every id it replaces is APPLIED, runs when none is,
@@ -98,7 +99,7 @@ internal fun plan(
             }
 
             is MigrationKind.Repeatable ->
-                if (record != null && record.state == HistoryState.APPLIED && record.revision == kind.revision) {
+                if (record.isAppliedRepeatable(kind.revision)) {
                     upToDate += migration.id
                 } else if (latest) {
                     dueRerunnable += DueMigration(migration)
@@ -140,6 +141,13 @@ private fun HistoryRecord?.isApplied(): Boolean = this?.state == HistoryState.AP
 
 private fun HistoryRecord?.isAppliedOnce(): Boolean =
     this != null && state == HistoryState.APPLIED && kind == StoredKind.ONCE
+
+/**
+ * APPLIED at [revision] by a repeatable's run. A migration that changes kind keeps its document, and after a run of
+ * another kind the data is that run's, whatever `revision` the document holds.
+ */
+private fun HistoryRecord?.isAppliedRepeatable(revision: String): Boolean =
+    this != null && state == HistoryState.APPLIED && kind == StoredKind.REPEATABLE && this.revision == revision
 
 private fun outOfOrder(id: String, other: String): String =
     "$id is pending, but $other, listed after it, is applied (out of order; OutOfOrder.RUN runs it)"

@@ -88,8 +88,9 @@ class Godwit internal constructor(
      * 8. Releases the lock.
      *
      * A migration is due when its history document is missing or not APPLIED; a repeatable also when its stored
-     * revision differs; an every-start one always. Stops at the first failure with [MigrationFailedException]: the
-     * migration is recorded FAILED with its error, and the next call retries it, outside step first. When the driver
+     * revision differs or a run of another kind wrote the document; an every-start one always. Stops at the first
+     * failure with [MigrationFailedException]: the migration is recorded FAILED with its error, and the next call
+     * retries it, outside step first. When the driver
      * throws after a commit that did apply (the reply was lost or timed out) while this run still holds the lock,
      * godwit's fenced FAILED write matches nothing; once the server acknowledges it with majority write concern, godwit
      * finds the document APPLIED by this run, reports the migration as applied and continues. A migration with only an

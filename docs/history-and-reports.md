@@ -67,7 +67,7 @@ majority read concern on the primary, at the start of every call.
 |---|---|---|---|
 | `_id` | String | always | The migration id |
 | `kind` | String | always | `ONCE`, `EVERY_START` or `REPEATABLE`. In Kotlin, `HistoryEntry.kind` and `Migration.kind` are a `MigrationKind`: `MigrationKind.Once`, `MigrationKind.EveryStart` or `MigrationKind.Repeatable(revision)` |
-| `revision` | String | repeatable, when a run applies it | The revision that was last applied. A different revision in code makes it due |
+| `revision` | String | repeatable, when a run applies it; removed when a run of another kind applies | The revision that was last applied. A different revision in code makes it due |
 | `description` | String | when declared | The migration's description as of the last run |
 | `steps` | [String] | always | `OUTSIDE_TRANSACTION`, `IN_TRANSACTION`, `IN_BATCHES`, in order, as of the last run. Empty for a migration recorded without running |
 | `state` | String | always | `RUNNING`, `FAILED` or `APPLIED` |
@@ -281,7 +281,7 @@ For an id with no document, it creates one with `kind: "ONCE"`, `steps: []` and 
 
 ### A repeatable migration
 
-`reference-countries` after its second revision applied:
+`reference-countries` after its first revision applied:
 
 ```json
 {
@@ -295,7 +295,7 @@ For an id with no document, it creates one with `kind: "ONCE"`, `steps: []` and 
   "transactionRetries": 0,
   "counts": { "countriesRemoved": 0 },
   "durationMs": 41,
-  "runCount": 2,
+  "runCount": 1,
   "lastRunAt": { "$date": "2026-10-02T10:16:31.610Z" },
   "startedAt": { "$date": "2026-10-02T10:16:31.569Z" },
   "finishedAt": { "$date": "2026-10-02T10:16:31.610Z" },
@@ -308,9 +308,12 @@ For an id with no document, it creates one with `kind: "ONCE"`, `steps: []` and 
 ```
 
 `revision` is written in the same transaction as the work, so it always names the revision whose data is in the
-database. When the code's revision becomes `"2026-11-15"`, the next start runs it again: the document goes to `RUNNING`
-with `attempts: 1` (attempts count from the last `APPLIED`), and on success `revision` becomes `"2026-11-15"` and
-`runCount` 3. `counts` and `durationMs` always describe the last run.
+database; a run of another kind under the same id removes it in its own `APPLIED` record
+([changing a migration's kind](repeatable-migrations.md#changing-a-migrations-kind)). When the code's revision becomes
+`"2026-11-15"`, the next start runs it again: the document goes to `RUNNING` with `attempts: 1` (attempts count from
+the last `APPLIED`), and on success `revision` becomes `"2026-11-15"` and `runCount` 2
+([repeatable migrations](repeatable-migrations.md#bumping-the-revision) shows that document). `counts` and
+`durationMs` always describe the last run.
 
 ### An every-start migration
 
@@ -424,7 +427,7 @@ In tests, the counts are the assertions (`outcome.count("ordersPaid") shouldBe 1
 | `ran` | The migrations that ran, in run order, as `MigrationOutcome`s |
 | `recorded` | The migrations recorded without running: adopted or superseded |
 | `upToDate` | Ids found already applied, and repeatables found at their current revision |
-| `pending` | Ids still due because the `Target` stopped before them. Always empty under `Target.Latest` |
+| `pending` | Once-only ids still due because the `Target` stopped before them. A target never runs repeatable or every-start migrations, and they are not listed here. Always empty under `Target.Latest` |
 | `unknownApplied` | `APPLIED` ids in history that the list does not know ([edge cases](#edge-cases)) |
 | `lockWait` | Time spent waiting for the lock; `null` when nothing was due and the lock was never taken |
 | `duration` | The whole call |

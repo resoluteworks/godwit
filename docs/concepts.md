@@ -196,7 +196,7 @@ migrate(list)
 1. **Check the list.** `validateMigrations` runs before any I/O: ids, duplicates, numbering, placement of repeatable
    and every-start migrations, batch sizes. See [ordering and validation](ordering-and-validation.md).
 2. **Read history and plan.** A migration is due when its history document is missing or not `APPLIED`; a repeatable
-   also when its stored revision differs; an every-start migration always.
+   also when its stored revision differs or a run of another kind wrote the document; an every-start migration always.
 3. **Check the plan.** A pending once-only migration listed before an applied once-only migration is out of order and
    fails by default (repeatable and every-start documents never make one out of order); history ids the list does not
    know are logged (or fail, under `UnknownApplied.FAIL`); a partially applied squash fails. These checks come before
@@ -213,8 +213,9 @@ migrate(list)
    this is where the adoption hook runs and records the ids history lacks, where the out-of-order and squash checks
    that waited for it run, and where a database with collections but no history is refused unless something was
    adopted. See [adopting an existing database](adopting-an-existing-database.md).
-8. **Run.** For each due migration: mark it `RUNNING` (`attempts` + 1), run the outside step, run the transactional
-   step with the `APPLIED` flip inside its transaction (an outside-only migration writes `APPLIED` after its step).
+8. **Run.** For each due migration: mark it `RUNNING` (`attempts` + 1, or 1 for a repeatable or every-start migration
+   whose last run applied), run the outside step, run the transactional step with the `APPLIED` flip inside its
+   transaction (an outside-only migration writes `APPLIED` after its step).
    The first failure records the migration `FAILED` with its error, stops the run and throws
    `MigrationFailedException`. See [failure and recovery](failure-and-recovery.md).
 9. **Release the lock** and return the report.

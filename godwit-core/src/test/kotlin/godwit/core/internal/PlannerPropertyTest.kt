@@ -98,7 +98,9 @@ private val cases = arbitrary { source ->
         val id = "rep-$index"
         migrations += random.withSteps(repeatable(id, revision = random.pick(listOf("r1", "r2"))), batches = false)
         val revision = random.pick(listOf(null, "r1", "r2"))
-        random.state()?.let { history += random.record(id, StoredKind.REPEATABLE, it, revision) }
+        // Mostly a repeatable's own document; sometimes one that a run of another kind wrote, after a change of kind.
+        val kind = if (random.chance(25)) random.pick(StoredKind.entries) else StoredKind.REPEATABLE
+        random.state()?.let { history += random.record(id, kind, it, revision) }
     }
     repeat(random.nextInt(0, 3)) { index ->
         val id = "every-$index"
@@ -160,6 +162,17 @@ class PlannerPropertyTest : StringSpec() {
 
                 withClue("no target runs a repeatable or every-start migration") {
                     if (case.target != Target.Latest) dueRerunnable.shouldBeEmpty()
+                }
+
+                withClue("a repeatable is up to date exactly when a repeatable's run applied its revision") {
+                    case.migrations.forEach { migration ->
+                        val kind = migration.kind as? MigrationKind.Repeatable ?: return@forEach
+                        val record = records[migration.id]
+                        val atRevision = record != null && record.kind == StoredKind.REPEATABLE &&
+                            record.state == HistoryState.APPLIED && record.revision == kind.revision
+                        (migration.id in plan.upToDate) shouldBe atRevision
+                        (migration.id in dueIds) shouldBe (!atRevision && case.target == Target.Latest)
+                    }
                 }
 
                 withClue(

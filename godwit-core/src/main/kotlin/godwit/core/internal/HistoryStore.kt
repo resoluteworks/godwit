@@ -142,8 +142,9 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
     /**
      * Records [migration] APPLIED with the facts of [run], fenced on [owner] and `state: RUNNING`: on [session] inside
      * the step's transaction, or on its own after an outside-only step when [session] is null. Removes `lastError` and
-     * `checkpoint`. A repeatable also records its `revision`; a repeatable or every-start migration sets `lastRunAt`
-     * and increments `runCount`; a superseding migration stores its `supersedes` list.
+     * `checkpoint`. A repeatable also records its `revision`, and every other kind removes it, so that `revision` names
+     * the revision whose data is in the database even when the id changed kind; a repeatable or every-start migration
+     * sets `lastRunAt` and increments `runCount`; a superseding migration stores its `supersedes` list.
      *
      * @throws LockLostException when the fence matches nothing: another run's marker carries another owner token.
      *   Inside a transaction, the exception aborts it.
@@ -155,9 +156,10 @@ internal class HistoryStore(private val bookkeeping: Bookkeeping) {
             .append("transactionRetries", run.transactionRetries)
             .append("durationMs", run.durationMs)
             .append("finishedAt", finishedAt)
-        val update = Document("\$set", set).append("\$unset", Document("lastError", "").append("checkpoint", ""))
+        val unset = Document("lastError", "").append("checkpoint", "")
+        val update = Document("\$set", set).append("\$unset", unset)
         val kind = migration.kind
-        if (kind is MigrationKind.Repeatable) set.append("revision", kind.revision)
+        if (kind is MigrationKind.Repeatable) set.append("revision", kind.revision) else unset.append("revision", "")
         if (kind != MigrationKind.Once) {
             set.append("lastRunAt", finishedAt)
             update.append("\$inc", Document("runCount", 1L))

@@ -6,11 +6,13 @@ import godwit.core.GodwitConfig
 import godwit.core.MigrationFailedException
 import godwit.core.OutOfOrder
 import godwit.core.StepKind
+import godwit.core.everyStart
 import godwit.core.fixtures.GodwitFixture
 import godwit.core.fixtures.LogCapture
 import godwit.core.fixtures.TestMongo
 import godwit.core.fixtures.keyValues
 import godwit.core.fixtures.line
+import godwit.core.fixtures.referenceCountries
 import godwit.core.fixtures.seeded
 import godwit.core.migration
 import io.kotest.assertions.throwables.shouldThrow
@@ -271,6 +273,57 @@ class LogCatalogueTest : StringSpec() {
                     }
                     logs.events("Applied migration").map { it.keyValues.keys.drop(7) } shouldBe
                         listOf(listOf("made"), listOf("ordersPaid"))
+                }
+            }
+        }
+
+        "every event the runner emits for repeatable and every-start migrations has its catalogue level and keys" {
+            val catalogue = kdocCatalogue().associateBy { it.message }
+            GodwitFixture(appName = "catalogue-rerunnable").use { f ->
+                f.history.insertOne(
+                    Document("_id", "reference-countries").append("kind", "REPEATABLE").append("revision", "2026-10-01")
+                        .append("steps", listOf("IN_TRANSACTION")).append("state", "RUNNING").append("origin", "RAN")
+                        .append("attempts", 1).append("owner", "an-earlier-run")
+                )
+                val countries = referenceCountries("2026-10-01")
+                val bootstrap = everyStart("bootstrap-customers")
+                    .outsideTransaction { count("usersChecked", 2) }
+                    .inTransaction { count("customersCreated", 0) }
+                val failing = everyStart("bootstrap-customers").outsideTransaction { error("identity provider down") }
+
+                LogCapture().use { logs ->
+                    f.godwit.migrate(countries, bootstrap)
+                    // The every-start migration left out of the list: up to date, with its document unknown.
+                    f.godwit.migrate(countries)
+                    shouldThrow<MigrationFailedException> { f.godwit.migrate(countries, failing) }
+
+                    logs.events.map { it.message }.toSet() shouldBe setOf(
+                        "Acquired migration lock",
+                        "Resuming interrupted migration",
+                        "Running migration",
+                        "Applied migration",
+                        "Migrations complete",
+                        "Unknown applied migrations",
+                        "Migrations up to date",
+                        "Migration failed"
+                    )
+                    logs.events.forEach { event ->
+                        withClue(event.line) {
+                            val row = catalogue.getValue(event.message)
+                            event.level.toString() shouldBe row.level
+                            val keys = event.keyValues.keys.toList()
+                            keys.take(row.keys.size) shouldBe row.keys
+                            if (!row.counters) keys shouldBe row.keys
+                        }
+                    }
+                    logs.events("Running migration").map { it.keyValues["kind"] } shouldBe
+                        listOf("REPEATABLE", "EVERY_START", "EVERY_START")
+                    logs.events("Applied migration").map { it.keyValues["kind"] } shouldBe
+                        listOf("REPEATABLE", "EVERY_START")
+                    logs.events("Applied migration").map { it.keyValues.keys.drop(7) } shouldBe
+                        listOf(listOf("countriesRemoved"), listOf("usersChecked", "customersCreated"))
+                    logs.events("Resuming interrupted migration").single().line shouldBe
+                        "Resuming interrupted migration id=reference-countries attempts=2"
                 }
             }
         }

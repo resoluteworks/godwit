@@ -225,8 +225,10 @@ run(m):
   throws `LockLostException` before any step runs. The run whose document was taken over finds out at its next fenced
   write, which matches nothing once its transaction reads the stale marker's owner token; a transaction that started
   before the stale marker first conflicts with it on that write (`WriteConflict`, 112), and the driver runs the body
-  again. It throws `LockLostException` too, and the next start resumes the migration. A stale marker costs a retry,
-  never a second commit.
+  again. It throws `LockLostException` too, and the next start resumes the migration. A stale marker that lands while
+  the other run's document is `RUNNING` costs a retry, never a second commit. A repeatable or every-start migration's
+  marker is unconditional, so it can also land after the other run's `APPLIED` record and reopen it, and the next start
+  runs the migration once more ([edge cases](#edge-cases)).
 - A run that lost the lock writes nothing more to history, with one exception: when a step's own error and the lock
   loss coincide, it still sends the `FAILED` write, so that `lastError` keeps the step's error. That write is fenced on
   this run's owner token and `RUNNING`, so it matches only while no other run has written its marker; once one has,
@@ -301,6 +303,11 @@ stateDiagram-v2
 | `APPLIED`, repeatable | Revision differs | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
 | `APPLIED`, every-start | Every `Target.Latest` start | `RUNNING`, `attempts` = 1 | unconditional marker upsert, under the lock | none |
 | `APPLIED`, once-only | anything | `APPLIED` | nobody: every write is conditional on `state != APPLIED` | |
+
+The kind in a row is the kind the list declares for the id. A document keeps its id when the migration changes kind,
+so an `APPLIED` document of any kind goes back to `RUNNING` when the list declares its id as an every-start migration,
+or as a repeatable whose revision a repeatable's run has not applied
+([changing a migration's kind](repeatable-migrations.md#changing-a-migrations-kind)).
 
 ## Lock operations
 
@@ -483,9 +490,11 @@ Why two markers: the once-only marker's conditional filter is what makes an appl
 start again, even by a run that lost the lock and does not know it yet. It does not stop such a run's marker from
 taking over another run's `RUNNING` document; the `checkLock()` after the marker and the owner fence handle that
 ([running one migration](#running-one-migration)). Reused for a repeatable, the same filter would hit
-11000 on the `APPLIED` document and skip the repeatable forever. The unconditional marker is safe under the lock. The
-one race it leaves (a run that lost the lock commits a repeatable just before the new holder's marker) makes the new
-holder run that repeatable once more at the same revision, which a repeatable tolerates: it is written to run again.
+11000 on the `APPLIED` document and skip the repeatable forever. The unconditional marker is safe under the lock. It
+leaves two races with a run that lost the lock, and each runs a repeatable once more at the same revision: that run's
+commit lands just before the new holder's marker, which then runs it again; or that run's marker lands after the new
+holder's `APPLIED` record and reopens it, and the next start runs it again ([edge cases](#edge-cases)). A repeatable
+tolerates both: it is written to run again.
 
 **`APPLIED` record.** Inside the step's transaction (or on its own after an outside-only step), fenced on this run's
 owner token and `RUNNING`:
@@ -498,14 +507,15 @@ db.getCollection("godwit-history").updateOne(
       state: "APPLIED", counts: { ordersPaid: 1200, ordersPending: 37 }, transactionRetries: 0,
       durationMs: 84, finishedAt: new Date()
     },
-    $unset: { lastError: "", checkpoint: "" }
+    $unset: { lastError: "", checkpoint: "", revision: "" }
   }
 )
 ```
 
-A repeatable also sets `revision` and `lastRunAt` and increments `runCount`; an every-start migration sets `lastRunAt` and
-increments `runCount`; a migration run under `OutOfOrder.RUN` sets `outOfOrder: true`; a superseding migration that
-runs stores `supersedes`. `matchedCount` 0 throws `LockLostException`, which aborts the transaction.
+A repeatable also sets `revision` (every other kind removes it, as here) and `lastRunAt` and increments `runCount`; an
+every-start migration sets `lastRunAt` and increments `runCount`; a migration run under `OutOfOrder.RUN` sets
+`outOfOrder: true`; a superseding migration that runs stores `supersedes`. `matchedCount` 0 throws `LockLostException`,
+which aborts the transaction.
 
 **`FAILED` record.** After the step's transaction aborted, outside any transaction, fenced on the owner token and on
 `RUNNING`:
@@ -847,8 +857,18 @@ its deadline passed before `shop-2b8e1/1` could acquire; `shop-2b8e1/1`'s fenced
 
 **The same race for a repeatable.**
 The stale run commits `reference-countries` at revision `"2026-10-01"` just before the new holder's unconditional marker.
-The new holder runs it again at the same revision: the same countries are upserted again and nothing changes. This is
-the one double run godwit allows, and only for a migration kind that is re-runnable by definition.
+The new holder runs it again at the same revision: the same countries are upserted again and nothing changes.
+
+**A stale repeatable marker after the takeover applied.**
+`shop-7f9c4/1` passed its check before the `reference-countries` marker for revision `"2026-11-15"` and paused past its
+lease. `shop-2b8e1/1` acquired, ran `"2026-11-15"` and recorded it `APPLIED`. The stale marker then lands. It has no
+filter on the state, so it takes the `APPLIED` document back to `RUNNING`, with `attempts: 1` and `shop-7f9c4/1`'s
+owner token, and leaves `revision` and `runCount` as the applied run wrote them. `shop-7f9c4/1`'s check after the
+marker throws `LockLostException`. Until a start runs it again, `status()` lists `reference-countries` as pending and
+`requireUpToDate` throws `PendingMigrationsException`. The next start resumes it (`Resuming interrupted migration`,
+`attempts=2`) and runs `"2026-11-15"` a second time, so `runCount` grows by 2 for one revision. An every-start
+migration's document is reopened the same way, and the next start runs it, as every start does. These two races are
+the double runs godwit allows, and only for migration kinds that are re-runnable by definition.
 
 **A heartbeat delayed past the deadline.**
 A stop-the-world pause of 70 s ends; the heartbeat thread wakes before the step's thread. It finds the local deadline
