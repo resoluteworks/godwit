@@ -40,7 +40,7 @@ the scopes, the DDL helpers, `validateMigrations`, the configuration, the result
 | Topology check | I/O | `hello` | Tells a replica set or `mongos` from a standalone server, only when a transactional step is due or adoption has ids to record |
 | Adoption | I/O | the app's hook, `godwit-history` | Calls `GodwitConfig.adoptApplied` under the lock while every history document is `ADOPTED` (or there is none), inserts the `ADOPTED` documents history does not hold yet with upserts that only insert (one transaction on a replica set) |
 | Runner | I/O | the app's data, through the scopes; `listCollections` | Runs each due migration: marker, outside step, transaction or pages, `APPLIED` record, failure handling, logging, the report; lists collections for the untracked-database guard |
-| Scopes | | | `OutsideTransactionScope` and `TransactionScope`: the database, counters, `checkLock()`, and in a transaction the session and attempt number |
+| Scopes | | | `OutsideTransactionScope` and `TransactionScope`: the database (with majority write concern in the outside step's), counters, `checkLock()`, and in a transaction the session and attempt number |
 | DDL helpers | I/O | the app's collections | `ensureCollection`, `ensureSearchIndex`, `dropIndexIfExists`: public extensions, and members of the outside step's scope |
 
 The split between the planner and everything else is deliberate: every decision about what to run is a pure function
@@ -185,7 +185,8 @@ run(m):
   log INFO "Running migration"
   try:
       if m has an outside step:
-          prepared = m.outsideStep(OutsideTransactionScope)        no session; counters of this run
+          prepared = m.outsideStep(OutsideTransactionScope)        no session; majority write concern on its
+                                                                   database; counters of this run
           lock.checkLock()
       when m.transactionalStep:
           none          -> nothing here: the APPLIED record follows the try, as godwit's own write
@@ -754,7 +755,8 @@ quotes a guidance line quotes it from this table, and the `MigrationFailedExcept
 | Lock acquire, renew, release, holder read | majority | majority | primary | 5 s per operation, client side |
 | A transactional step's transaction (body, checkpoint, `APPLIED` record) | snapshot | majority | primary | the server's transaction lifetime (60 s by default); the driver's 120 s retry window |
 | The other-type check before an `inBatches` step's last page | majority | | the client's | the client's |
-| An outside step's operations | the client's | the client's | the client's | the client's |
+| An outside step's operations through its scope: `database`, `collection(...)`, `ensureCollection`, `dropIndexIfExists` | the client's | majority | the client's | the client's |
+| An app service's operations in an outside step | the service's | the service's | the service's | the service's |
 | `hello` (topology check) | | | primary | the client's |
 | `listCollections` (untracked-database guard) | | | primary: the driver lists collections there whatever the client's read preference | the client's |
 
@@ -766,14 +768,19 @@ quotes a guidance line quotes it from this table, and the `MigrationFailedExcept
   point is majority-committed.
 - **The 5 s lock timeout.** A renewal that hangs on a stalled majority would otherwise keep the heartbeat thread blocked
   past the lease. With the timeout, the failure surfaces and the local deadline decides.
-- **Outside steps use the app's settings.** godwit does not override the read preference or write concern of the app's
-  client for the app's own collections. An app whose client reads from secondaries reads from secondaries in its outside
-  steps. An app whose client writes with `w:1` writes with `w:1` there too, and a failover can then roll back an outside
-  step's writes after godwit has recorded the migration APPLIED with majority, so the step never runs again: an outside
-  step whose writes must survive a failover uses majority write concern
-  ([outside-transaction steps](outside-transaction-steps.md#an-outside-step)).
+- **Majority writes in outside steps.** The outside step's `database` and `collection(...)` carry majority write
+  concern, whatever the app's client sets. A step's write with `w:1` could be rolled back by a failover after godwit
+  has recorded the migration APPLIED with majority, and the step would never run again to redo it; with majority, the
+  write survives every failover the record survives. Every other setting is the app's: an app whose client reads from
+  secondaries reads from secondaries in its outside steps. Majority replaces the client's whole write concern, so its
+  `wtimeoutMS` and `journal` do not apply there, and the client's `timeoutMS` bounds the majority wait. `runCommand`
+  sends its command as written, so a command that writes carries its own `writeConcern`, and the search index commands
+  take none. An app service the step calls keeps its own settings
+  ([outside-transaction steps](outside-transaction-steps.md#write-concern),
+  [DD-36](design-decisions.md#dd-36-an-outside-steps-scope-writes-with-majority-write-concern)).
 - **Codecs.** godwit's collections use the driver's default codec registry, whatever registry the app's client has.
-  The scopes' `database` and `collection(...)` carry the app's client settings, codecs included.
+  The scopes' `database` and `collection(...)` carry the app's client settings, codecs included; the outside step's
+  write concern is the one exception.
 
 These are fixed, not configurable ([configuration.md](configuration.md)).
 
@@ -931,9 +938,11 @@ what it just wrote could miss it. Read with `collection(...).withReadPreference(
 The other-type check before an `inBatches` step's last page inherits it too; it reads with majority read concern on the
 run's causally consistent session, so a secondary answers it only once it has the pages the run committed. The
 untracked-database guard's `listCollections` does not: the driver sends it to the primary whatever the client's read
-preference. The outside steps inherit `w=1` as well: a write the primary acknowledged and lost in a failover before
-replicating it is rolled back, while the APPLIED record that follows, written with majority to the new primary, stays,
-so the step never runs again to redo it. Write with `withWriteConcern(WriteConcern.MAJORITY)` in such a step.
+preference. The outside steps do not inherit `w=1`: their `database` and `collection(...)` write with majority, so
+what they write is majority-committed before the APPLIED record. The shop's services keep `w=1`. A service's write in
+an outside step that the primary acknowledged and lost in a failover before replicating it is rolled back, while the
+APPLIED record that follows, written with majority to the new primary, stays, so the step never runs again to redo it.
+Build such a service's collection with `withWriteConcern(WriteConcern.MAJORITY)`.
 
 **A client-side operation timeout on the app's client.**
 The app's client sets `timeoutMS=5000`. The driver then bounds each `withTransaction` by that timeout instead of its

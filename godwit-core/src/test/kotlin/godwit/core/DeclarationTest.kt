@@ -19,7 +19,7 @@ import io.mockk.mockk
 import org.bson.Document
 
 private val database = mockk<MongoDatabase>()
-private val outsideScope = OutsideTransactionScope("id", database, StepContext {})
+private val outsideScope = OutsideTransactionScope("id", mockk<MongoDatabase>(relaxed = true), StepContext {})
 private val transactionScope = TransactionScope("id", database, mockk<ClientSession>(), 1, StepContext {})
 
 /** What running a migration's step bodies did: each step body appends what it saw. */

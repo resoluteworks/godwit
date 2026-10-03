@@ -117,7 +117,7 @@ correct.
 
 | Step | Declared with | Session | How often the code runs | What commits, and when |
 |---|---|---|---|---|
-| outside step | `outsideTransaction { }` | none | at least once: a retry runs it again from the start | each write on its own, as it happens, with your client's write concern (majority, for writes a failover must not roll back) |
+| outside step | `outsideTransaction { }` | none | at least once: a retry runs it again from the start | each write on its own, as it happens: majority write concern through the step's `database` and `collection(...)`, an app service's own write concern through the service ([write concern](outside-transaction-steps.md#write-concern)) |
 | transactional step | `inTransaction { }` | `session` | once, or more when the driver retries the transaction | the step's writes and the `APPLIED` history record, in one transaction: exactly once |
 | transactional step, paged | `inBatches(collection, pending, batchSize) { docs -> }` | `session` | once per page, or more when the driver retries that page | each page's writes with the page's checkpoint: each page exactly once; the last page (fewer than `batchSize` documents) commits the `APPLIED` record instead of a checkpoint |
 

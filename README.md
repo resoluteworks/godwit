@@ -10,11 +10,12 @@ godwit runs MongoDB schema and data migrations for Kotlin JVM applications. A mi
 by a chain of calls, and an application lists its migrations in a plain `List<Migration>`: the list is the registry
 and the run order. There are no annotations, no reflection, no classpath scanning, no code generation and no
 dependency injection: a migration that needs a service is a function that takes it as a parameter. Each step's name
-states its guarantee: `outsideTransaction` runs at least once and must be idempotent (its writes need majority write
-concern to survive a failover), `inTransaction` commits exactly once together with its history record, `inBatches`
-commits each page exactly once with a checkpoint. A lease lock serialises every process that shares the database, a
-history collection holds one document per migration, and godwit rolls forward only. godwit-core has two runtime
-dependencies besides the Kotlin standard library: the MongoDB Kotlin sync driver and slf4j-api.
+states its guarantee: `outsideTransaction` runs at least once and must be idempotent (its `database` and
+`collection(...)` write with majority write concern, so its writes survive a failover; an app service it calls needs
+majority too), `inTransaction` commits exactly once together with its history record, `inBatches` commits each page
+exactly once with a checkpoint. A lease lock serialises every process that shares the database, a history collection
+holds one document per migration, and godwit rolls forward only. godwit-core has two runtime dependencies besides the
+Kotlin standard library: the MongoDB Kotlin sync driver and slf4j-api.
 
 | Principle | What it means in code |
 |---|---|

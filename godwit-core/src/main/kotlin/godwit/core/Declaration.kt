@@ -118,7 +118,8 @@ class MigrationDraft internal constructor(
     internal val supersedes: List<String>
 ) {
     /**
-     * Adds the step that runs without a session or a transaction. Every write in it commits on its own.
+     * Adds the step that runs without a session or a transaction. Every write in it commits on its own; those made
+     * through the scope's `database` and `collection(name)` carry majority write concern ([OutsideTransactionScope]).
      *
      * It runs at least once: when the migration fails or the process dies, the next [Godwit.migrate] runs it again
      * from the start, so it must be idempotent. DDL (collections, indexes, search indexes), server-side updates that

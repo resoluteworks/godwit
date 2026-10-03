@@ -7,9 +7,11 @@ import org.bson.Document
 val cartExpiry60Days = migration("010-cart-expiry-60-days")
     .outsideTransaction {
         database.runCommand(
-            Document("collMod", "carts").append(
-                "index",
-                Document("keyPattern", Document("updatedAt", 1)).append("expireAfterSeconds", 60L * 24 * 60 * 60)
-            )
+            Document("collMod", "carts")
+                .append(
+                    "index",
+                    Document("keyPattern", Document("updatedAt", 1)).append("expireAfterSeconds", 60L * 24 * 60 * 60)
+                )
+                .append("writeConcern", Document("w", "majority"))
         )
     }

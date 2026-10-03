@@ -1,5 +1,6 @@
 package godwit.core
 
+import com.mongodb.WriteConcern
 import com.mongodb.client.model.CreateCollectionOptions
 import com.mongodb.kotlin.client.ClientSession
 import com.mongodb.kotlin.client.MongoCollection
@@ -21,11 +22,16 @@ sealed class StepScope {
 
     /**
      * The database being migrated, obtained from the cluster passed to [Godwit], so it carries that cluster's codec
-     * registry and settings.
+     * registry and settings, with one exception: in an outside step its write concern is majority
+     * ([OutsideTransactionScope.database]).
      */
     abstract val database: MongoDatabase
 
-    /** A collection of [database] as raw [Document]s. */
+    /**
+     * A collection of [database] as raw [Document]s, with [database]'s settings: majority write concern in an outside
+     * step. In a transactional step the transaction's majority commit carries every write, whatever the collection's
+     * write concern.
+     */
     fun collection(name: String): MongoCollection<Document> = database.getCollection(name, Document::class.java)
 
     /**
@@ -50,27 +56,52 @@ sealed class StepScope {
  * The receiver of an `outsideTransaction` step. There is no session and no transaction: every write commits on its
  * own, and the step runs again from the start on a retry, so every call in it must be idempotent.
  *
+ * [database] and [collection] write with majority write concern, whatever the app's client sets, so what the step
+ * writes through them, DDL included, is majority-committed before godwit records the migration APPLIED. An app service
+ * the step calls keeps its own settings, and its writes here need majority write concern too: `w=majority` on its
+ * client, or `withWriteConcern(WriteConcern.MAJORITY)` on its collection. A client that sets no write concern writes
+ * with the server's default: the cluster-wide default when one is set; otherwise majority on most replica sets from
+ * MongoDB 5.0, and `w:1` before 5.0 and on a primary-secondary-arbiter replica set.
+ *
  * The DDL helpers are members of this scope only. `ensureCollection(...)` does not resolve inside `inTransaction` or
  * `inBatches`, where DDL fails at runtime.
  */
 class OutsideTransactionScope internal constructor(
     override val id: String,
-    override val database: MongoDatabase,
+    appDatabase: MongoDatabase,
     private val context: StepContext
 ) : StepScope() {
+    /**
+     * The database being migrated, from the cluster passed to [Godwit], with majority write concern. Every other
+     * setting is the app database's: codec registry, read preference, read concern and timeout. Majority replaces the
+     * client's whole write concern, so its `wtimeoutMS` and `journal` do not apply here; the client's `timeoutMS` is
+     * what bounds the majority wait.
+     *
+     * A failover can roll back a write the primary acknowledged before a majority had it. Written with `w:1`, a
+     * step's write could be rolled back after godwit has recorded the migration APPLIED with majority, and the step
+     * would never run again to redo it; with majority, it survives every failover the APPLIED record survives. Calls on
+     * it that take a write concern carry majority, DDL included; [MongoDatabase.runCommand] sends its command as
+     * written, so a command that writes puts `writeConcern` in its document. A write concern the step sets itself
+     * (`database.withWriteConcern(...)`) replaces majority.
+     */
+    override val database: MongoDatabase = appDatabase.withWriteConcern(WriteConcern.MAJORITY)
+
     override fun count(name: String, n: Long): Unit = context.count(name, n)
 
     override fun checkLock(): Unit = context.checkLock()
 
-    /** [MongoDatabase.ensureCollection] on [database]. */
+    /** [MongoDatabase.ensureCollection] on [database], so the create carries majority write concern. */
     fun ensureCollection(name: String, options: CreateCollectionOptions = CreateCollectionOptions()): Boolean =
         database.ensureCollection(name, options)
 
-    /** [MongoCollection.ensureSearchIndex] on [collection], calling [checkLock] between polls while it waits. */
+    /**
+     * [MongoCollection.ensureSearchIndex] on [collection], calling [checkLock] between polls while it waits. The
+     * search index commands take no write concern, so the create carries none.
+     */
     fun ensureSearchIndex(collection: String, name: String, definition: Bson, awaitReady: Duration? = null): Boolean =
         ensureSearchIndex(collection(collection), name, definition, awaitReady, SEARCH_INDEX_POLL, ::checkLock)
 
-    /** [MongoCollection.dropIndexIfExists] on [collection]. */
+    /** [MongoCollection.dropIndexIfExists] on [collection], so the drop carries majority write concern. */
     fun dropIndexIfExists(collection: String, indexName: String): Boolean =
         collection(collection).dropIndexIfExists(indexName)
 }

@@ -218,6 +218,7 @@ These are not configurable. Each protects a guarantee, or is not worth a knob.
 |---|---|---|
 | Transaction options | snapshot read concern, majority write concern, reads from the primary | the history record and the data it describes survive a failover together only with majority writes, the step's reads are one consistent view only under snapshot, and a transaction reads from the primary; another value breaks the exactly-once guarantee |
 | Bookkeeping collections | majority read and write concern, primary reads, the driver's default codec registry | a lock acquired with `w:1` can be rolled back on failover and leave two holders; an app's custom codecs must not reach godwit's own documents |
+| An outside step's `database` and `collection(...)` | majority write concern; the client's codec registry, read preference, read concern and timeout | a step's write with `w:1` can be rolled back on failover after the migration is recorded APPLIED, and the step never runs again ([outside-transaction steps](outside-transaction-steps.md#write-concern)) |
 | Lock operation timeout | 5 s on the client for every lock operation | a stalled majority must not hold the heartbeat past the lease |
 | Lock polling | 250 ms to 5 s with jitter; the holder is logged every 10 s | `waitTimeout` is the one knob that matters |
 | Failure policy | stop at the first failure, no skip, no `failFast = false` | later migrations assume earlier ones |

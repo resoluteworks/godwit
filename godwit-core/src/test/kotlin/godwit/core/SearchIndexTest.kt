@@ -1,6 +1,7 @@
 package godwit.core
 
 import com.mongodb.MongoCommandException
+import com.mongodb.WriteConcern
 import com.mongodb.kotlin.client.MongoCollection
 import godwit.core.fixtures.CommandRecorder
 import godwit.core.fixtures.atlasMongo
@@ -104,6 +105,21 @@ class SearchIndexTest : StringSpec() {
                 }
 
                 checks shouldBe listOf("checkLock")
+            }
+        }
+
+        "the outside step's member creates through the majority collection; the create carries no write concern" {
+            val recorder = CommandRecorder()
+            atlasMongo.client("search-write-concern", recorder).use { client ->
+                val database = client.getDatabase(UUID.randomUUID().toString()).withWriteConcern(WriteConcern.W1)
+                database.getCollection("products", Document::class.java).insertOne(Document("name", "kettle"))
+                val scope = OutsideTransactionScope("001-initial-setup", database, StepContext {})
+
+                scope.ensureSearchIndex("products", "product-search", dynamic) shouldBe true
+
+                scope.collection("products").writeConcern shouldBe WriteConcern.MAJORITY
+                val create = recorder.commands("createSearchIndexes").single()
+                create.command.containsKey("writeConcern") shouldBe false
             }
         }
 

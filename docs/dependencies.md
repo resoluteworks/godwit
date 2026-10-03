@@ -380,6 +380,16 @@ What you do: call it in the outside step and hand the result to the transaction,
 every service method that writes takes the session as its first parameter. See
 [transactions and sessions](transactions-and-sessions.md).
 
+### A service that writes in an outside step
+
+State: a migration's outside step calls a service method that inserts without a session, and the shop's client sets
+`w=1`. What godwit does: the step's own `database` and `collection(...)` write with majority write concern, but the
+service writes through the database it was built from, with `w:1`. A failover before the insert reaches a secondary
+rolls it back after godwit has recorded the migration APPLIED, and the step never runs again. What you do: give the
+client `w=majority`, or build the service's collection with `withWriteConcern(WriteConcern.MAJORITY)`
+([outside-transaction steps](outside-transaction-steps.md#write-concern)). A service method called with `session` in a
+transactional step needs nothing: the transaction's majority commit carries its writes.
+
 ### A service that reads data when it is built
 
 State: the shop adds a `ShippingCountries` service that loads the `countries` collection in its constructor and keeps

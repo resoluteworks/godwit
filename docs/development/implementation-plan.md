@@ -425,12 +425,14 @@ JVM).
   `inBatches` step (P4), a repeatable or every-start migration to run (P5), the adoption hook to call or a squash to
   record (P6).
 - Running one migration, per [architecture](../architecture.md#running-one-migration): marker; `checkLock()` right
-  after it; `Resuming interrupted migration` when the previous state was `RUNNING`; the outside step with its own counters; `checkLock()` between
-  steps; `inTransaction` through `ClientSession.withTransaction` with snapshot read concern, majority write concern and
-  primary reads; a fresh scope and counters per attempt; `Retrying transaction` and `transactionRetries`; `Slow
-  transaction` above `slowTransactionWarning`; the fenced `APPLIED` record as the last write of the transaction; an
-  outside-only migration records `APPLIED` after its step, and after a driver exception sends that fenced record once
-  more, then reads the document when the second write matches nothing.
+  after it; `Resuming interrupted migration` when the previous state was `RUNNING`; the outside step with its own
+  counters, its scope's `database` the app's with majority write concern
+  ([DD-36](../design-decisions.md#dd-36-an-outside-steps-scope-writes-with-majority-write-concern)); `checkLock()`
+  between steps; `inTransaction` through `ClientSession.withTransaction` with snapshot read concern, majority write
+  concern and primary reads; a fresh scope and counters per attempt; `Retrying transaction` and `transactionRetries`;
+  `Slow transaction` above `slowTransactionWarning`; the fenced `APPLIED` record as the last write of the transaction;
+  an outside-only migration records `APPLIED` after its step, and after a driver exception sends that fenced record
+  once more, then reads the document when the second write matches nothing.
 - The transaction wrapper: a pause before each attempt after the first (5 ms, x1.5 per attempt, at most 500 ms, with
   jitter); `Retrying transaction` for the first retry of a transaction, then at most every 10 s, with `error` the code
   name and code of the previous body's error or `commit`; every retry counted in `transactionRetries`.
@@ -461,7 +463,8 @@ JVM).
 
 | Spec | Covers |
 |---|---|
-| `ScopesTest` | counters add up per name, in the order the names were first counted, across a migration's two steps; the scopes count and check the lock through their context |
+| `ScopesTest` | counters add up per name, in the order the names were first counted, across a migration's two steps; the scopes count and check the lock through their context; the outside scope's database is the app's with majority write concern, the transaction scope's the app's own |
+| `OutsideStepWriteConcernTest` | on a client with `w:1`, every write and DDL command an outside step sends through its scope (`create`, `createIndexes`, `insert`, `update`, `delete`, `dropIndexes`) carries `writeConcern: {w: "majority"}`, while a service built on the app's database sends `{w: 1}`; the scope keeps the app database's codec registry, read preference, read concern and timeout; in `inTransaction` and `inBatches` the scope's database keeps `w:1`, the step's writes carry no write concern and the commit carries majority; `runCommand` sends its document as written, with a write concern only when the document has one |
 | `HistoryEntriesTest` | a history document with every field maps to `HistoryEntry` field by field, the checkpoint's `lastId` keeping its type; absent fields read as null, 0, empty or false; a repeatable's kind carries its stored revision, empty before a run applies it |
 | `TransactionTest` | the transaction wrapper over a scripted session: the pause before each run (5 ms growing by half to at most 500 ms, between half and all of it); `Retrying transaction` naming the body's error by code name and code (or class and code), or `commit`, logged first and then at most once per interval, every retry counted; `Slow transaction` and the longest attempt; an error the driver does not retry propagates as the body threw it |
 | `RunnerTest` | outside-only, transactional-only and two-step migrations; the prepared value reaches the transaction, and the same instance reaches every driver retry (a `TransientTransactionError` fail point with a prepared value the body would drain or a one-shot `Sequence`); counters from both steps add up; report fields; stop at the first failure; `status`, `requireUpToDate`, `history` |
@@ -474,7 +477,7 @@ JVM).
 | `LockLossTest` | a run whose marker lands after another process took the lock over and wrote its own marker (the run's marker held back by a `blockConnection` fail point past the lease): the marker takes the document over, the `checkLock()` right after it throws before the outside step runs, the other process's fenced `APPLIED` write matches nothing and it throws `LockLostException`, and the next start applies the migration once; a heartbeat blocked by a fail point during a long step: the step's next `checkLock()` throws, the transaction aborts, history is unchanged, `LockLostException` without a cause; a step that throws its own error once the deadline has passed: `LockLostException` whose cause is that error, and the document `FAILED` with it as `lastError`; the same after another run's marker took the document: the cause is kept and the `FAILED` write matches nothing; an `inTransaction` call that fails with a network error once the deadline has passed (a `failCommand` fail point with `closeConnection`, which the driver labels `TransientTransactionError` inside a transaction, as it does a server selection timeout): the driver runs the body again, its first `checkLock()` throws, history is unchanged, `LockLostException` without a cause; the same call on a client with `timeoutMS` failing with `MongoOperationTimeoutException`, which `withTransaction` does not retry: `LockLostException` whose cause is the timeout; the runner's own checks, with steps that never call `checkLock()` while the heartbeat loses the lock: a transaction body that returns (nothing commits), an outside-only step that returns (nothing records it `APPLIED`), a two-step migration's outside step (the transaction never starts), and a loss right after one migration's commit (the next migration's marker is never sent); a commit that applies once the lock is lost and then times out: `LockLostException` with the timeout as its cause, and the migration `APPLIED` |
 | `TopologyTest` | a standalone container: `TransactionsUnsupportedException` listing the due transactional migrations, before the lock; an outside-only list runs; a transactional repeatable that becomes due under the lock still throws `TransactionsUnsupportedException`; on the replica set, one `hello` for a call whose plans before and under the lock both have a transactional step due |
 | `DdlHelpersTest` | each helper twice in a row; concurrent `ensureCollection` from two threads; `dropIndexIfExists` of a missing index returns false, also on a MongoDB 8.3 or later image (`mongoNewerImage`), where a drop that raced another one returns true |
-| `SearchIndexTest` (tag `Atlas`) | create, exists, wait until queryable, wait for an existing index that is still building, `SearchIndexNotReadyException`, `checkLock()` between polls |
+| `SearchIndexTest` (tag `Atlas`) | create, exists, wait until queryable, wait for an existing index that is still building, `SearchIndexNotReadyException`, `checkLock()` between polls; the member's create carries no write concern |
 | `LogCatalogueTest` | every event this phase emits, with its level and keys |
 
 **Gate.**

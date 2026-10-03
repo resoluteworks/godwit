@@ -543,13 +543,16 @@ godwit sets these itself; none is configurable:
 | History writes outside a transaction: RUNNING, FAILED, the APPLIED flip of an outside-only migration, a recorded squash or mark | n/a | `majority` | primary |
 | Adoption's records: one transaction on a replica set, one write per id on a standalone server | `snapshot` in the transaction | `majority` | primary |
 | Lock operations | `majority` | `majority` | primary |
-| The outside step | your client's settings | your client's settings | your client's settings |
+| The outside step's `database` and `collection(...)`, with `ensureCollection` and `dropIndexIfExists` | your client's settings | `majority` | your client's settings |
+| An app service called from the outside step | the service's settings | the service's settings | the service's settings |
 
 Snapshot read concern gives the body one consistent view of the database as of the transaction's first command
-(godwit's read of the history document), and a majority commit makes that view and the commit survive a failover. The
-outside step is ordinary driver code on `database`, so it uses whatever your client configures; with `w:1`, its writes
-can be rolled back by a failover after the migration is recorded APPLIED, so give them majority write concern
-([outside-transaction steps](outside-transaction-steps.md#an-outside-step)).
+(godwit's read of the history document), and a majority commit makes that view and the commit survive a failover,
+the writes of the services the body calls with `session` included. The outside step has no transaction, so godwit
+gives its `database` and `collection(...)` majority write concern and keeps your client's other settings: with `w:1`,
+a write there could be rolled back by a failover after the migration is recorded APPLIED. An app service keeps its own
+settings, so its writes in an outside step need majority write concern too
+([outside-transaction steps](outside-transaction-steps.md#write-concern)).
 
 ## Edge cases
 

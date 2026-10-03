@@ -83,7 +83,9 @@ val fileStore = migration("003-file-store")
 ```
 
 The id, the position in the list and the decision to run it are the shop's. `database` is the step's database, from the
-client godwit was given. The setup function is DDL, so it goes in the outside step.
+client godwit was given, with majority write concern, so the library's DDL is majority-committed before godwit records
+the migration APPLIED ([write concern](outside-transaction-steps.md#write-concern)). The setup function is DDL, so it
+goes in the outside step.
 
 ## When the library changes its schema
 

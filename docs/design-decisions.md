@@ -43,6 +43,7 @@ numbers are stable, so a discussion, a commit or a review comment can cite them 
 | [DD-33](#dd-33-a-run-of-another-kind-clears-the-stored-revision) | A run of another kind clears the stored revision | [Repeatable migrations](repeatable-migrations.md#changing-a-migrations-kind) |
 | [DD-34](#dd-34-the-other-type-_id-check-runs-outside-the-transaction) | The other-type `_id` check runs outside the transaction | [Architecture](architecture.md#checkpoint-writes) |
 | [DD-35](#dd-35-guidance-for-the-failures-with-a-known-fix) | Guidance for the failures with a known fix | [Architecture](architecture.md#error-guidance) |
+| [DD-36](#dd-36-an-outside-steps-scope-writes-with-majority-write-concern) | An outside step's scope writes with majority write concern | [Outside-transaction steps](outside-transaction-steps.md#write-concern) |
 
 [Decisions that follow from these](#decisions-that-follow-from-these) lists the narrower decisions each page records.
 
@@ -914,6 +915,47 @@ from one table. A cause godwit does not recognise adds no line. The 60 s thresho
 
 **In depth.** [Architecture](architecture.md#error-guidance),
 [failure and recovery](failure-and-recovery.md#transaction-past-60-s).
+
+## DD-36. An outside step's scope writes with majority write concern
+
+**Decision.** `OutsideTransactionScope.database`, and so `collection(name)`, `ensureCollection` and `dropIndexIfExists`,
+carry majority write concern, whatever the write concern of the client passed to `Godwit`. `ensureSearchIndex` is the
+one helper without it: the search index commands take no write concern, so its create carries none. Every other setting
+of the app's database stays: codec registry, read preference, read concern and timeout. App services passed into a step
+keep their own settings, and the docs state that their writes in an outside step need majority write concern too.
+Transactional steps are unchanged: the transaction's commit carries majority. The public `MongoDatabase` and
+`MongoCollection` DDL extensions keep the settings of the handle they are called on.
+
+**Options considered.**
+
+- The app's write concern, with the majority requirement documented.
+- Refuse to run an outside step when the client's write concern is not majority.
+- Majority for the services' writes as well.
+- Majority on the scope's handles, the services' own settings documented (chosen).
+
+**Rationale.** godwit records the migration APPLIED with majority. A step's write acknowledged with `w:1` is on the
+primary only, so a failover can keep the APPLIED record and roll the write back, and the step never runs again to redo
+it: at least once fails silently. `w:1` is what an app gets without asking on a primary-secondary-arbiter replica set
+and before MongoDB 5.0, and a documented requirement is easy to miss with nothing failing when it is. A refusal cannot
+see the server's default without an admin command, and would fail apps whose own traffic uses `w:1` on purpose. The
+services are the app's code: godwit sees them only as calls the step makes, and could reach their collections only by
+wrapping the app's client. The scope's handles are the ones godwit owns, so it sets their write concern, the same one
+its own history writes use; keeping the other settings keeps the app's codecs and read preference in the step.
+
+**Consequences.** Every write through the scope waits until a majority of members has it: one replication round trip per
+write, more while replication lags, so a step that writes many documents uses server-side `updateMany` or `bulkWrite`
+rather than a loop of single writes. The scope's write concern is `WriteConcern.MAJORITY` whole, so the client's
+`wtimeoutMS` and `journal` do not apply to it: a client-side `timeoutMS` is what bounds the majority wait, a write
+behind a lagging majority times out under it and the next start runs the step again, and without it the write waits
+until a majority is back, as godwit's history writes do. godwit's lock and history writes need the same majority, so a
+deployment without one stops at the lock before any step runs. `database.runCommand(...)` sends its command as written,
+without the database's write concern, so a command that writes puts `writeConcern` in its document. A search index the
+step creates gets no majority wait before APPLIED. A write concern the step sets itself
+(`collection(name).withWriteConcern(...)`) replaces majority. A service's write in an outside step with `w:1` can still
+be rolled back after APPLIED.
+
+**In depth.** [Outside-transaction steps](outside-transaction-steps.md#write-concern),
+[architecture](architecture.md#read-and-write-concerns-timeouts).
 
 ## Decisions that follow from these
 

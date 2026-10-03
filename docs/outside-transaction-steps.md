@@ -56,7 +56,8 @@ What godwit does when it runs it:
 
 1. Records the migration RUNNING in `godwit-history`.
 2. Calls `checkLock()`, then the step, with an `OutsideTransactionScope` as its receiver: `id`, `database`,
-   `collection(name)`, `count(name, n)`, `checkLock()` and the three DDL helpers. There is no `session`.
+   `collection(name)`, `count(name, n)`, `checkLock()` and the three DDL helpers. There is no `session`. `database`
+   and `collection(name)` write with majority write concern ([write concern](#write-concern)).
 3. Calls `checkLock()` again. A migration with no transactional step is then recorded APPLIED with its counters,
    outside any transaction, fenced on this run's lock token; a migration with one hands the step's return value to it
    ([transactions and sessions](transactions-and-sessions.md)).
@@ -70,14 +71,9 @@ nothing, reads the document: a write that applied although its reply was lost le
 and the migration counts as applied. Any other outcome propagates the driver's exception, and the next start finds the
 migration APPLIED or runs the step again.
 
-At least once holds for writes that a failover cannot roll back. godwit writes the APPLIED record with majority write
-concern; the step's own writes use your client's write concern. With `w:1` (set on the client, or the server's default
-before MongoDB 5.0 and, from 5.0, on a primary-secondary-arbiter replica set), the primary acknowledges a write before
-any secondary has it. If that primary fails before replicating it, the APPLIED record is written to the new primary,
-which never had the write, and the returning member rolls the write back: the history says APPLIED, and the step never
-runs again. Give an outside step's writes majority write concern: `w=majority` on the client (the server's own default
-on most replica sets from MongoDB 5.0), or `database.withWriteConcern(WriteConcern.MAJORITY)` and
-`collection(...).withWriteConcern(WriteConcern.MAJORITY)` inside the step.
+At least once holds for writes that a failover cannot roll back, which is why the step's `database` and
+`collection(name)` write with majority write concern whatever your client sets; an app service the step calls keeps
+its own ([write concern](#write-concern)).
 
 An outside step has no session. The fragment below is a migration's outside step that passes one.
 
@@ -88,6 +84,45 @@ This does not compile:
     collection("orders").updateMany(session, exists("currency", false), set("currency", "GBP"))
 }
 ```
+
+## Write concern
+
+godwit records the migration APPLIED with majority write concern. A write acknowledged with `w:1` is on the primary
+only: if that primary fails before replicating it, the APPLIED record is written to the new primary, which never had
+the write, and the returning member rolls the write back. The history says APPLIED, and the step never runs again to
+redo it. So the step's own handles write with majority write concern, whatever your client's write concern is, and keep
+every other setting of your client's database: codec registry, read preference, read concern and timeout.
+
+| In an outside step | Write concern |
+|---|---|
+| `database`, `collection(name)` and every driver call on them that takes a write concern: inserts, updates, deletes, `createIndex`, `createCollection`, `drop`, `renameCollection`, and so a library's setup function called on `database` | majority |
+| `ensureCollection`, `dropIndexIfExists` | majority: they run on `database` and `collection(name)` |
+| `ensureSearchIndex` | none: the search index commands take no write concern |
+| `database.runCommand(command)` | what `command` says: the driver sends it as written, and a command without a `writeConcern` field gets the server's default. `010-cart-expiry-60-days` puts one in its `collMod` ([changing an index](#changing-an-index-or-a-collection-option)) |
+| A handle the step configures itself, such as `collection(name).withWriteConcern(...)` | the one it sets |
+| An app service passed into the step | the service's own: the write concern of the database it was built from |
+
+Every majority write waits until a majority of the members has it: one replication round trip per write, more while
+replication lags, so a step that writes many documents uses server-side `updateMany` or `bulkWrite` rather than a loop
+of single writes. Majority replaces your client's whole write concern on the step's handles, so the client's
+`wtimeoutMS` and `journal` do not apply to them. A client-side `timeoutMS` bounds the majority wait: a write behind a
+lagging majority times out and fails the migration, and the next start runs the step again; without `timeoutMS`, the
+write waits until a majority is back. Whether a majority write waits for the journal is the replica set's
+`writeConcernMajorityJournalDefault`, on by default. godwit's lock and history writes need the same majority, so a
+deployment without one stops at the lock, before any step runs.
+
+An app service keeps its own settings, so its writes in an outside step need majority write concern too: `w=majority` on
+the client, or `withWriteConcern(WriteConcern.MAJORITY)` on the service's collection. A client that sets no write
+concern writes with the server's default: the cluster-wide default when `setDefaultRWConcern` sets one; otherwise
+majority on most replica sets from MongoDB 5.0, and `w:1` before 5.0 and on a primary-secondary-arbiter replica set.
+There, a service's write in an outside step can be rolled back after the migration is recorded APPLIED
+([edge case](#a-service-writes-with-w1-in-an-outside-step)). The shop's MongoDB services only read in outside steps;
+`005-customer-external-ids` reads customers through `CustomerService` there. They write in transactional steps, where
+the transaction's majority commit carries every write, the services' included
+([transactions and sessions](transactions-and-sessions.md#read-and-write-concerns)).
+
+Outside a migration, the DDL extensions write with the write concern of the database or collection they are called on
+([the extensions, for libraries](#the-extensions-for-libraries)).
 
 ## Which driver calls are idempotent
 
@@ -103,7 +138,7 @@ This does not compile:
 | `createSearchIndex` with a name that exists | `IndexAlreadyExists` (68) when the definition differs; the Atlas local image accepts the same definition again | No | `ensureSearchIndex` |
 | `updateSearchIndex` with the same definition | Sets it again | Yes | The driver call |
 | `drop()` of a collection that is gone | The driver ignores `NamespaceNotFound` (26) | Yes | The driver call |
-| `collMod` (TTL, validator, validation level) | Sets the same value | Yes | `database.runCommand(...)` |
+| `collMod` (TTL, validator, validation level) | Sets the same value | Yes | `database.runCommand(...)`, with `writeConcern` in the command ([write concern](#write-concern)) |
 | `renameCollection` | `NamespaceNotFound` (26) when the source is gone; `NamespaceExists` (48) when the target exists | No | Check first: [Renaming a collection](#renaming-a-collection) |
 | `updateMany` with `$set` and a filter that excludes finished documents | Updates only what is left | Yes | [Large server-side updates](#large-server-side-updates) |
 | `$inc`, `$push`, `$mul`, inserts without a natural key | Applies again | No | `inTransaction`, or a guard in the filter |
@@ -229,6 +264,9 @@ val fileStore = migration("003-file-store")
         database.ensureFileStoreSchema()
     }
 ```
+
+Called on the step's `database`, the library's DDL carries majority write concern; called anywhere else, the
+extensions keep the settings of the database or collection they are called on ([write concern](#write-concern)).
 
 The other two extensions work the same way. A later version of the library adds a search index and drops an index it
 no longer needs; the shop adds a migration that calls the new function:
@@ -420,13 +458,18 @@ import org.bson.Document
 val cartExpiry60Days = migration("010-cart-expiry-60-days")
     .outsideTransaction {
         database.runCommand(
-            Document("collMod", "carts").append(
-                "index",
-                Document("keyPattern", Document("updatedAt", 1)).append("expireAfterSeconds", 60L * 24 * 60 * 60)
-            )
+            Document("collMod", "carts")
+                .append(
+                    "index",
+                    Document("keyPattern", Document("updatedAt", 1)).append("expireAfterSeconds", 60L * 24 * 60 * 60)
+                )
+                .append("writeConcern", Document("w", "majority"))
         )
     }
 ```
+
+`runCommand` sends the command as written, without the database's write concern, so the command carries its own
+`writeConcern` ([write concern](#write-concern)).
 
 Changing `002-carts` instead would do nothing on any database where `002-carts` is applied: godwit never runs it there
 again. It would only change fresh databases, so production and a new test database would disagree. Change schema with
@@ -514,8 +557,9 @@ created implicitly by an insert, without a validator.
 
 godwit: `ensureCollection` returns `false` and changes nothing; it does not compare options.
 
-You: set options on an existing collection with `collMod` (`database.runCommand(Document("collMod", "carts")...)`), in
-the same step after `ensureCollection` or in a new migration. `collMod` is safe to repeat.
+You: set options on an existing collection with `collMod`, as `database.runCommand(Document("collMod", "carts")...)`
+with `writeConcern` in the command ([write concern](#write-concern)), in the same step after `ensureCollection` or in a
+new migration. `collMod` is safe to repeat.
 
 ### The search index is not ready in time
 
@@ -596,6 +640,20 @@ a transactional step is due ([transactions and sessions](transactions-and-sessio
 
 You: nothing for these three; the shop's later migrations need a replica set.
 
+### A service writes with `w:1` in an outside step
+
+The shop runs on a primary-secondary-arbiter replica set, whose server default is `w:1`, and its client sets no write
+concern. A migration's outside step creates `cart-events` with `ensureCollection` and then records an event through an
+app service built on the shop's database.
+
+godwit: `ensureCollection` carries majority write concern, the service's insert carries none, so the server applies
+`w:1`. The primary acknowledges the insert and fails before the secondary has it; the new primary takes godwit's
+APPLIED record, the returning member rolls the insert back, and the step never runs again. The collection survives,
+the event does not.
+
+You: give the client `w=majority`, or build the service's collection with `withWriteConcern(WriteConcern.MAJORITY)`,
+or write through the step's `collection(name)` instead of the service.
+
 ## Design decisions
 
 ### Three helpers, and no wrapper over the index API
@@ -623,6 +681,25 @@ The member form is what a migration calls unqualified, and it does not resolve i
 where DDL fails at runtime, so a misplaced call is a compile error. The extension form lets a library's setup function
 use the same helpers without depending on godwit's runner. The member form of `ensureSearchIndex` also checks the lock
 while it waits.
+
+### Majority write concern on the scope's handles
+
+Chosen: the scope's `database` and `collection(name)` carry majority write concern, with the rest of the app
+database's settings; an app service keeps its own.
+
+The APPLIED record is a majority write, so a step's write is safe from a failover only when it is a majority write
+too; with the app's `w:1`, a failover could keep the record and roll the write back, and the step would never run
+again. Every other setting stays the app's, so a step reads with the app's codecs and read preference.
+
+Considered:
+
+| Option | Why not chosen |
+|---|---|
+| The app's write concern, with a documented requirement | `w:1` is the server's default on a primary-secondary-arbiter replica set and before MongoDB 5.0, so an app that sets nothing can lose a step's writes after APPLIED; a requirement in the docs is easy to miss, and nothing fails when it is missed |
+| Refuse to run an outside step on a client whose write concern is not majority | A client that sets no write concern gets the server's default, which godwit could learn only through an admin command; and it would fail apps whose own traffic uses `w:1` on purpose |
+| Majority for the services as well | godwit sees the services only as code the step calls; their collections are theirs, and changing them would mean wrapping the app's client |
+
+See [DD-36](design-decisions.md#dd-36-an-outside-steps-scope-writes-with-majority-write-concern).
 
 ### At least once, without per-call progress
 

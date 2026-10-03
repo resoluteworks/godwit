@@ -449,17 +449,21 @@ as it is and add a migration that changes every database:
 val cartExpiry60Days = migration("010-cart-expiry-60-days")
     .outsideTransaction {
         database.runCommand(
-            Document("collMod", "carts").append(
-                "index",
-                Document("keyPattern", Document("updatedAt", 1)).append("expireAfterSeconds", 60L * 24 * 60 * 60)
-            )
+            Document("collMod", "carts")
+                .append(
+                    "index",
+                    Document("keyPattern", Document("updatedAt", 1)).append("expireAfterSeconds", 60L * 24 * 60 * 60)
+                )
+                .append("writeConcern", Document("w", "majority"))
         )
     }
 ```
 
-`collMod` with the same value again succeeds, so the outside step is idempotent. On a fresh database `002-carts` creates
-the 30-day index and `010-cart-expiry-60-days` changes it to 60 days a moment later. Fixing a bug in a migration that
-has run nowhere yet (it failed everywhere it ran, or it is not deployed) is an ordinary code change.
+`collMod` with the same value again succeeds, so the outside step is idempotent; `runCommand` sends the command as
+written, so it carries its own `writeConcern` ([write concern](outside-transaction-steps.md#write-concern)). On a fresh
+database `002-carts` creates the 30-day index and `010-cart-expiry-60-days` changes it to 60 days a moment later. Fixing
+a bug in a migration that has run nowhere yet (it failed everywhere it ran, or it is not deployed) is an ordinary code
+change.
 
 ### An applied id is renamed
 

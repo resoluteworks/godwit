@@ -980,6 +980,14 @@ the step continues, the migration applies, and some customers are never linked. 
 sees. Let exceptions escape the step; count what was skipped deliberately (`count("customersSkipped", n)`) when skipping
 is correct.
 
+**A failover right after an outside step.**
+The primary acknowledges the last `createIndexes` of `002-carts`, then fails. The step's writes through `database` and
+`collection(...)`, `ensureCollection` included, carry majority write concern, so a majority had each of them before it
+was acknowledged: the new primary has the schema, and the APPLIED record godwit writes there describes it. A write an app
+service made in the step with `w:1` is the exception: the returning member rolls it back, and the step never runs
+again to redo it. Give such a service majority write concern
+([outside-transaction-steps.md](outside-transaction-steps.md#write-concern)).
+
 **The `adoptApplied` hook throws.**
 The hook reads `schema-log` and finds a document without `version`; `getString` returns null and building the set
 throws. The exception propagates from `migrate` unchanged, under no migration's name. Nothing was recorded, and history
