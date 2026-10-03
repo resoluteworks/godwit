@@ -1,11 +1,5 @@
-export OP_ACCOUNT := my.1password.com
 include gradle.properties
--include .env
 export
-
-env:
-	rm -f .env
-	op read "op://Development/resolute-works-open-source/godwit.env.local" > .env
 
 test:
 	./gradlew clean test
