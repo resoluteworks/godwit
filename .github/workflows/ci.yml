@@ -20,4 +20,5 @@ jobs:
       - run: python3 scripts/coverage-gate.py
       - run: ./gradlew -p docs-snippets compileKotlin
       - run: ./gradlew -p docs-snippets test
+      - run: scripts/publish-github-packages.test.sh
       - run: scripts/check-docs.sh

@@ -96,7 +96,7 @@ replica set locally and in CI, reports coverage, generates API docs and publishe
 | `buildSrc/src/main/kotlin/godwit/buildlogic/VerifyRuntimeDependencies.kt`, `buildSrc/src/test/kotlin/godwit/buildlogic/VerifyRuntimeDependenciesTest.kt` | the task class behind `verifyRuntimeDependencies` (below), and its test |
 | `buildSrc/src/main/kotlin/common-conventions.gradle.kts` | `kotlin("jvm")`, `jacoco`, Dokka, kotlinter; `jvmToolchain(21)`; `allWarningsAsErrors`; `withSourcesJar()`, `withJavadocJar()`; group and version from `godwitVersion`; no default dependencies (no `kotlin-reflect`, no serialization library, no logging backend) |
 | `buildSrc/src/main/kotlin/test-conventions.gradle.kts` | Kotest (JUnit 5 runner, assertions, property), MockK, Logback, Testcontainers and Awaitility as `testImplementation`; `useJUnitPlatform()`; the container images (`mongoImage`, `mongoNewerImage`, `atlasLocalImage`) and `godwitVersion` as system properties of every test task, so the fixtures hold no copy of them; `test` excludes the `Atlas` Kotest tag, `atlasTest` runs only it; `jacocoTestReport` (XML and HTML) after either; `test` depends on `lintKotlin` |
-| `buildSrc/src/main/kotlin/publish-conventions.gradle.kts` | `maven-publish`, `signing`, `com.gradleup.nmcp`; publication `mavenJava`; POM with name, the module's required `description`, Apache-2.0 license, SCM `resoluteworks/godwit`, developer; GPG signing on the maintainer's machine |
+| `buildSrc/src/main/kotlin/publish-conventions.gradle.kts` | `maven-publish`, `signing`, `com.gradleup.nmcp`; publication `mavenJava`; POM with name, the module's required `description`, Apache-2.0 license, SCM `resoluteworks/godwit`, developer; the `GitHubPackages` repository (`https://maven.pkg.github.com/resoluteworks/godwit`, credentials from `GITHUB_ACTOR` and `GITHUB_TOKEN`); GPG signing on the maintainer's machine, required only for the Central Portal upload |
 | `godwit-core/build.gradle.kts` | the three convention plugins; `description`; `api("org.mongodb:mongodb-driver-kotlin-sync:$mongoDriverVersion")`, `implementation("org.slf4j:slf4j-api:$slf4jVersion")`; the `verifyRuntimeDependencies` task (below) wired into `check` |
 | `godwit-test/build.gradle.kts` | the three convention plugins; `description`; `api(project(":godwit-core"))`, `implementation("org.testcontainers:testcontainers-mongodb:$testContainersVersion")` |
 | `godwit-core/src/test/kotlin/godwit/core/fixtures/TestMongo.kt` | one replica-set container per test JVM (`org.testcontainers.mongodb.MongoDBContainer`, image from `mongoImage`, `--setParameter enableTestCommands=1` for fail points), a client per call, a UUID database per call |
@@ -105,6 +105,7 @@ replica set locally and in CI, reports coverage, generates API docs and publishe
 | `Makefile` | below |
 | `.github/workflows/ci.yml` | below; it runs `scripts/check-docs.sh` |
 | `.github/workflows/publish-docs.yml` | on a `v*` tag: `./gradlew :dokkaGenerate`, then deploy `docs/` to GitHub Pages |
+| `.github/workflows/publish-github-packages.yml`, `scripts/publish-github-packages.sh`, `scripts/publish-github-packages.test.sh` | on every push to `main`: publish each module whose `godwitVersion` is not yet in GitHub Packages, so every version on `main` resolves before it is on Maven Central; the script checks each module's POM first, so a push without a version bump publishes nothing and a re-run completes a partial publish; its test runs with fake `curl` and `gradlew`, from `make test` and CI |
 | `LICENSE` | the Apache License 2.0 text |
 | `.editorconfig` | `root = true`, UTF-8, final newline, trimmed trailing whitespace, `max_line_length = 120`, 4-space indent for `*.kt` and `*.kts`, ktlint `intellij_idea` style without trailing commas |
 | `.sdkmanrc` | `java=21.0.2-tem` |
@@ -155,7 +156,8 @@ test:
 	./gradlew atlasTest
 	python3 scripts/coverage-gate.py
 	./gradlew -p docs-snippets test
-	./gradlew :coverallsJacoco
+	scripts/publish-github-packages.test.sh
+	COVERALLS_REPO_TOKEN=$$COVERALLS_GODWIT ./gradlew :coverallsJacoco
 
 check-docs:
 	scripts/check-docs.sh
@@ -196,13 +198,15 @@ jobs:
       - run: python3 scripts/coverage-gate.py
       - run: ./gradlew -p docs-snippets compileKotlin
       - run: ./gradlew -p docs-snippets test
+      - run: scripts/publish-github-packages.test.sh
       - run: scripts/check-docs.sh
 ```
 
 `ubuntu-latest` has Docker, which Testcontainers needs. `check-docs.sh` builds offline, so the steps before it resolve
 the `docs-snippets` build's dependencies into the Gradle cache; from P7 on, the second of them runs the docs' Kotest
 specs for real. CI is the gate and uploads nothing: the Coveralls
-report is uploaded by `make test`, which reads `COVERALLS_REPO_TOKEN` from `.env`.
+report is uploaded by `make test`, which hands the plugin the maintainer's `COVERALLS_GODWIT` environment
+variable as `COVERALLS_REPO_TOKEN`.
 
 **Behaviours.**
 
@@ -813,7 +817,7 @@ GitHub Pages site serves the Dokka output.
 | 13 | Revisions are compared for equality, not order | An older release applies its own revision again during a rollback | documented in [repeatable migrations](../repeatable-migrations.md#edge-cases) | `Applied migration ... kind=REPEATABLE` from the older release |
 | 14 | A deleted repeatable or every-start migration keeps an `APPLIED` document | An unknown-applied warning on every start | the documented manual deletion; see [the settled decisions](#decisions-settled-before-p0) | `Unknown applied migrations ids=[...]` |
 | 15 | Kotlin metadata compatibility for consumers on older compilers | A consumer cannot compile against godwit | [DD-26](../design-decisions.md#dd-26-jvm-21-and-kotlin-24); the consumer smoke project compiles with the Kotlin version the README states | the smoke project's build |
-| 16 | Publishing depends on the maintainer's GPG key and Central Portal credentials in `.env` | A release blocked or half-published | `make release` runs `publish-local` (which signs) before `publish`; nmcp publishes the aggregation in one deployment | `curl` on the published POM |
+| 16 | Publishing depends on the maintainer's GPG key and Central Portal credentials in the environment | A release blocked or half-published | `make release` runs `publish-local` (which signs) before `publish`; nmcp publishes the aggregation in one deployment | `curl` on the published POM |
 | 17 | The adoption hook runs again on every start until a migration runs | A slow or side-effecting hook slows or disturbs those starts | documented as a pure read ([adopting an existing database](../adopting-an-existing-database.md#leaving-the-hook-in-place)); `AdoptionTest` pins when it is and is not called | `Adopted applied migrations` on more than one start |
 
 ## See also

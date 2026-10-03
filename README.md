@@ -1,9 +1,10 @@
 # godwit
 
 **Status: pre-release `0.1.0`, not yet on Maven Central.** Version `0.1.0` is implemented and tested, and the examples
-on this page and in [docs](docs/) compile and run against it. Until it is on Maven Central, `make publish-local` at the
-root of this repository installs it in Maven Local, and a build that adds `mavenLocal()` to its repositories can use
-it. godwit stays on 0.x until it has run in a production application
+on this page and in [docs](docs/) compile and run against it. Every version on `main` is published to this
+repository's GitHub Packages registry, `https://maven.pkg.github.com/resoluteworks/godwit`, which Gradle reads with a
+GitHub token that has the `read:packages` scope; `make publish-local` at the root of this repository installs it in
+Maven Local instead. godwit stays on 0.x until it has run in a production application
 ([DD-25](docs/design-decisions.md#dd-25-0x-until-proven-in-production)).
 
 godwit runs MongoDB schema and data migrations for Kotlin JVM applications. A migration is a plain Kotlin value, built
@@ -44,8 +45,9 @@ Kotlin standard library: the MongoDB Kotlin sync driver and slf4j-api.
 ### Add the dependencies
 
 godwit's artifacts go to Maven Central with its first release. Until then, run `make publish-local` at the root of
-this repository, which installs them in Maven Local, and keep the `mavenLocal` repository below; once they are on
-Maven Central, `mavenCentral()` alone is enough. Set the version once in `gradle.properties`:
+this repository, which installs them in Maven Local, and keep the `mavenLocal` repository below, or declare the GitHub
+Packages registry above in its place, with a token as the password; once they are on Maven Central, `mavenCentral()`
+alone is enough. Set the version once in `gradle.properties`:
 
 ```properties
 godwitVersion=<version>

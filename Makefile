@@ -6,7 +6,8 @@ test:
 	./gradlew atlasTest
 	python3 scripts/coverage-gate.py
 	./gradlew -p docs-snippets test
-	./gradlew :coverallsJacoco
+	scripts/publish-github-packages.test.sh
+	COVERALLS_REPO_TOKEN=$$COVERALLS_GODWIT ./gradlew :coverallsJacoco
 
 check-docs:
 	scripts/check-docs.sh

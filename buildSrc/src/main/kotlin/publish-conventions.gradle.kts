@@ -7,6 +7,20 @@ plugins {
 publishing {
     val publishGit = "resoluteworks/godwit"
 
+    repositories {
+        // Every version on main goes to this repository's GitHub Packages registry; Maven Central carries only the
+        // releases cut with `make release`. The publish-github-packages workflow is the only writer: it runs with the
+        // GITHUB_TOKEN of a GitHub Actions run, which is where both variables come from.
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/$publishGit")
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
+
     publications {
         create<MavenPublication>("mavenJava") {
             from(components["java"])
@@ -39,8 +53,8 @@ publishing {
 }
 
 // Signing is required only for the Central Portal upload. With a key configured (the maintainer's machine) every
-// publication is signed, including the one published to Maven Local; without one, publishing to Maven Local skips
-// the signing tasks.
+// publication is signed, including the one published to Maven Local; without one (the publish-github-packages
+// workflow), publishing to Maven Local or GitHub Packages skips the signing tasks.
 signing {
     setRequired(provider { gradle.taskGraph.allTasks.any { it.name == "publishAggregationToCentralPortal" } })
     sign(publishing.publications["mavenJava"])
